@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +10,7 @@ _ISOEXEC_FA3_SOURCE = (
 )
 _ISOEXEC_FA3_WHEEL_DIR = "/opt/isoexec-wheels"
 _ISOEXEC_ONLY = os.environ.get("MODAL_ISOEXEC_ONLY") == "1"
+_ISOEXEC_QWEN_REVISION = "2fc06364715b967f1860aea9cf38778875588b17"
 _ISOEXEC_FA3_BUILD_ENV = {
     "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
     "FLASH_ATTENTION_DISABLE_SM80": "TRUE",
@@ -228,8 +230,21 @@ def run_script(command: str):
 def isoexec_full_distribution_command(
     python: str = "/tmp/skyrl-isoexec-env/bin/python",
 ) -> list[str]:
-    """Return the bounded one-step command used by the combined local-repo smoke."""
-    engine_kwargs = '{"max_model_len":256,"max_num_seqs":4,' '"compilation_config":{"mode":0,"cudagraph_mode":"NONE"}}'
+    """Return the bounded two-step command used by the combined local-repo smoke."""
+    engine_kwargs = json.dumps(
+        {
+            "max_model_len": 256,
+            "max_num_seqs": 4,
+            "compilation_config": {"mode": 0, "cudagraph_mode": "NONE"},
+            "additional_config": {
+                "isoexec": {
+                    "model_v2": "custom_qwen3_5_0_8b",
+                    "model_factory": "examples.model_v2.qwen3_5_0_8b:make_model",
+                }
+            },
+        },
+        separators=(",", ":"),
+    )
     overrides = [
         "data.train_data=['/root/data/gsm8k/train.parquet']",
         "data.val_data=['/root/data/gsm8k/validation.parquet']",
@@ -243,6 +258,7 @@ def isoexec_full_distribution_command(
         "trainer.bf16=true",
         "trainer.remove_microbatch_padding=true",
         "trainer.fused_lm_head_logprob=false",
+        "trainer.recompute_old_logprobs_per_minibatch=true",
         "trainer.mtp.enabled=false",
         "trainer.placement.colocate_all=true",
         "trainer.placement.policy_num_nodes=1",
@@ -253,8 +269,8 @@ def isoexec_full_distribution_command(
         "trainer.policy.megatron_config.context_parallel_size=1",
         "trainer.policy.megatron_config.expert_model_parallel_size=1",
         "trainer.policy.megatron_config.expert_tensor_parallel_size=1",
-        "trainer.epochs=1",
-        "trainer.max_training_steps=1",
+        "trainer.epochs=2",
+        "trainer.max_training_steps=2",
         "trainer.eval_before_train=false",
         "trainer.eval_interval=-1",
         "trainer.update_epochs_per_batch=1",
@@ -328,6 +344,7 @@ def _run_isoexec_full_distribution_impl():
     inherited_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = ":".join(value for value in (isoexec_root, skyrl_root, inherited_pythonpath) if value)
     env["RAY_ADDRESS"] = "auto"
+    env["SKYRL_PYTHONPATH_EXPORT"] = "1"
     env["SKYRL_DUMP_INFRA_LOG_TO_STDOUT"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -392,7 +409,7 @@ def _run_isoexec_full_distribution_impl():
 
     model_path = Path("/root/data/models/Qwen3.5-0.8B")
     if not (model_path / "config.json").is_file():
-        snapshot_download("Qwen/Qwen3.5-0.8B", local_dir=model_path)
+        snapshot_download("Qwen/Qwen3.5-0.8B", revision=_ISOEXEC_QWEN_REVISION, local_dir=model_path)
     train_path = Path("/root/data/gsm8k/train.parquet")
     if not train_path.is_file():
         subprocess.run(
@@ -431,7 +448,7 @@ def _run_isoexec_full_distribution_impl():
     reader.start()
     timed_out = False
     try:
-        returncode = process.wait(timeout=1500)
+        returncode = process.wait(timeout=3000)
     except subprocess.TimeoutExpired:
         timed_out = True
         process.terminate()
@@ -445,13 +462,24 @@ def _run_isoexec_full_distribution_impl():
     Path("/root/data/isoexec-full-distribution.log").write_text(stdout)
     volume["/root/data"].commit()
     if timed_out:
-        raise RuntimeError("combined SkyRL/IsoExec smoke exceeded its 25-minute training timeout")
+        raise RuntimeError("combined SkyRL/IsoExec smoke exceeded its 50-minute training timeout")
     if returncode:
         raise RuntimeError(f"combined SkyRL/IsoExec smoke failed with exit code {returncode}")
     required = ("[ISOEXEC-", "policy/full_logprobs_verified_rows", "Training done!")
     missing = [marker for marker in required if marker not in stdout]
     if missing:
         raise RuntimeError(f"combined smoke exited zero but missed required evidence: {missing}")
+    if stdout.count("[ISOEXEC-PRESCORE] PASS") < 2:
+        raise RuntimeError("two-step smoke did not produce two exact full-distribution prescore receipts")
+    applied_versions = {
+        line.split("applied version=", 1)[1].split()[0]
+        for line in stdout.splitlines()
+        if "[ISOEXEC-WEIGHTS] applied version=" in line
+    }
+    if len(applied_versions) < 2:
+        raise RuntimeError(
+            "two-step smoke did not apply two distinct trainer weight versions to the vLLM worker"
+        )
 
 
 if isoexec_image is not None:
@@ -460,7 +488,7 @@ if isoexec_image is not None:
         gpu=os.environ.get("MODAL_ISOEXEC_GPU", "H100!"),
         volumes=volume,
         retries=0,
-        timeout=1800,
+        timeout=3600,
         name="run_isoexec_full_distribution",
     )(_run_isoexec_full_distribution_impl)
 else:
@@ -475,7 +503,7 @@ def main(command: str = "nvidia-smi", isoexec_full_distribution: bool = False):
     Args:
         command (str, optional): Command to run. Defaults to "nvidia-smi".
         isoexec_full_distribution: Run the bounded combined local SkyRL/IsoExec
-            one-step smoke instead of ``command``. Defaults to False.
+            two-step smoke instead of ``command``. Defaults to False.
 
     Examples:
         modal run main.py --command "uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"

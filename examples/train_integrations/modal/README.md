@@ -56,9 +56,10 @@ defaults to `/root/data`
 This mode mounts both local checkouts, installs the local IsoExec checkout into
 the isolated SkyRL Megatron environment, pins CUTLASS DSL 4.5.2 only in that
 temporary combined environment, builds the official FlashAttention FA3 Hopper
-package from pinned commit `e81a70ce` (which supports CUDA 13), and runs one
-Qwen3.5-0.8B update. The normal SkyRL environment stays unchanged. Success
-requires IsoExec engagement, exact full-distribution verified rows, and
+package from pinned commit `e81a70ce` (which supports CUDA 13), and runs two
+Qwen3.5-0.8B updates through the importable IsoExec Model V2 example factory.
+The normal SkyRL environment stays unchanged. Success requires two exact
+full-distribution prescore receipts, two applied weight versions, and
 `Training done!`.
 
 ```bash
@@ -66,8 +67,8 @@ MODAL_ISOEXEC_ONLY=1 MODAL_ISOEXEC_GPU='H100!' \
 modal run main.py --isoexec-full-distribution
 ```
 
-The dedicated function has a 30-minute hard timeout and the training subprocess
-has a 25-minute timeout. It does not run unless the flag is supplied.
+The dedicated function has a 60-minute hard timeout and the training subprocess
+has a 50-minute timeout. It does not run unless the flag is supplied.
 
 ## Configuration
 

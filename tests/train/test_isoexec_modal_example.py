@@ -21,12 +21,24 @@ def test_modal_example_resolves_combined_local_config(monkeypatch):
     overrides = command[entrypoint + 1 :]
 
     monkeypatch.setattr("isoexec.models.config_for", lambda path: SimpleNamespace(layers=()))
+    monkeypatch.setattr(
+        "isoexec.v2.worker_source.load_custom_worker_source",
+        lambda path, revision, factory: (
+            SimpleNamespace(config=SimpleNamespace(layers=(), mtp=None), model_contract=object()),
+            SimpleNamespace(path=path),
+        ),
+    )
     cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
     validate_cfg(cfg)
 
     assert cfg.trainer.enable_isoexec is True
     assert cfg.trainer.rollout_logprob_comparison == "full"
     assert cfg.generator.inference_engine.logprob_output == "full"
+    assert cfg.trainer.max_training_steps == 2
+    assert cfg.generator.inference_engine.engine_init_kwargs["additional_config"]["isoexec"] == {
+        "model_v2": "custom_qwen3_5_0_8b",
+        "model_factory": "examples.model_v2.qwen3_5_0_8b:make_model",
+    }
     assert cfg.trainer._isoexec_config.full_distribution_comparison is True
 
 
