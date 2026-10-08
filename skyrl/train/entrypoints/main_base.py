@@ -179,6 +179,18 @@ class BasePPOExp:
             policy_model_name=resolve_policy_model_name(cfg),
         )
 
+    def get_callbacks(self) -> list:
+        """Training callbacks registered with the trainer.
+
+        IsoExec contributes the callback that merges its performance counters
+        into every logged step when ``trainer.enable_isoexec`` is set.
+        """
+        if self.cfg.trainer.enable_isoexec:
+            from isoexec.integrations.skyrl.perf import training_callbacks
+
+            return training_callbacks(self.cfg)
+        return []
+
     def get_trainer(
         self,
         cfg,
@@ -204,6 +216,7 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             generator=generator,
             colocate_pg=colocate_pg,
+            callbacks=self.get_callbacks(),
         )
 
     def get_tracker(self) -> Tracking:
