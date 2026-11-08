@@ -275,6 +275,29 @@ class MegatronModelWrapper:
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
 
+    def _scale_logits(self, logits: torch.Tensor, temperature: float) -> torch.Tensor:
+        if temperature != 1.0:
+            logits.div_(temperature)
+        return logits
+
+    def _packed_logprobs(
+        self,
+        logits: torch.Tensor,
+        packed_targets: torch.Tensor,
+        cu_seqlens_padded: torch.Tensor,
+        unpacked_seqlen: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        return from_parallel_logits_to_logprobs_packed_sequences(
+            logits, packed_targets, cu_seqlens_padded, unpacked_seqlen, **kwargs
+        )
+
+    def _observe_forward(self, logits: torch.Tensor, data: Dict[str, Any], packed_seq_params) -> None:
+        return None
+
+    def _finalize_model_grads(self, num_tokens: Optional[int]) -> None:
+        finalize_model_grads_with_expert_adapter_sync(self.actor_module, num_tokens)
+
     def _model_attention_mask(self, attention_mask):
         if self._implicit_causal_mask_only:
             return None
@@ -351,7 +374,7 @@ class MegatronModelWrapper:
         """
         pending = self._pending_grad_sync
         self._pending_grad_sync = None
-        finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
+        self._finalize_model_grads(pending["num_tokens"] if pending else None)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -433,8 +456,8 @@ class MegatronModelWrapper:
                 fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
 
             # temperature normalization (the fused path applies it inside the op)
-            if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
+            if not fused_lm_head:
+                logits = self._scale_logits(logits, temperature)
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             if self.cfg.algorithm.enable_sample_support_replay:
@@ -490,7 +513,7 @@ class MegatronModelWrapper:
                     softcap=self._logit_softcap,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
-                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
+                token_logprobs = self._packed_logprobs(
                     logits,
                     packed_targets,
                     packed_seq_params.cu_seqlens_q_padded,
@@ -515,6 +538,7 @@ class MegatronModelWrapper:
                     cp_group=None,
                     chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
                 )
+            self._observe_forward(logits, data, packed_seq_params)
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
@@ -837,8 +861,8 @@ class MegatronModelWrapper:
                 fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
 
             # temperature normalization (the fused path applies it inside the op)
-            if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
+            if not fused_lm_head:
+                logits = self._scale_logits(logits, temperature)
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             support_entropy = None
@@ -916,7 +940,7 @@ class MegatronModelWrapper:
                 else:
                     token_logprobs = fused_result
             elif packed_seq_params is not None and packed_targets is not None:
-                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
+                token_logprobs = self._packed_logprobs(
                     logits,
                     packed_targets,
                     packed_seq_params.cu_seqlens_q_padded,

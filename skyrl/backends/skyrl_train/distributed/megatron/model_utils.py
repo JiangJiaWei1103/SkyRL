@@ -18,7 +18,7 @@
 
 import warnings
 from math import prod
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import megatron.core.parallel_state as mpu
 import torch
@@ -676,6 +676,23 @@ def from_parallel_logits_to_logprobs(
     return logprobs[:, :-1]
 
 
+def _token_logprobs_in_chunks(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    chunk_size: Optional[int],
+    token_logprob_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    if chunk_size is None or chunk_size >= logits.shape[0]:
+        return token_logprob_fn(logits, targets)
+    parts = [
+        token_logprob_fn(chunk_logits, chunk_targets)
+        for chunk_logits, chunk_targets in zip(
+            torch.split(logits, chunk_size, dim=0), torch.split(targets, chunk_size, dim=0)
+        )
+    ]
+    return torch.cat(parts, dim=0)
+
+
 def from_parallel_logits_to_logprobs_packed_sequences(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,
@@ -689,6 +706,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     chunk_size: Optional[int] = None,
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    token_logprob_fn: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Get log probabilities from TP sharded vocab logits for packed sequences.
 
@@ -711,6 +729,10 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         sub_seq_lengths (list[list[int]], optional): Per-row sub-sequence lengths for controller-side sequence packing.
             When provided, ``cu_seqlens_padded`` is interpreted as one entry per sub-sequence, and output values are
             scattered back to the row offsets used by ``PackedDataCollator``.
+        token_logprob_fn (callable, optional): Replaces the TP-distributed log-probability op. Receives this rank's
+            ``[chunk, vocab_size//TP]`` logits and the matching ``[chunk]`` shifted targets, and returns ``[chunk]``
+            token log probabilities; the caller owns any TP reduction. ``vocab_start_index``, ``vocab_end_index``
+            and ``group`` are not used on this path.
 
     Returns:
         torch.Tensor: Unpacked log probabilities tensor with shape [batch_size, unpacked_seqlen-1].
@@ -755,7 +777,11 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     # vocab_parallel_logits and recomputes softmax in backward (~3x peak memory
     # vs DistributedLogprob's ~2x), so chunking actively hurts in that regime.
     seq_len_local = vocab_parallel_logits.shape[1]
-    if chunk_size is not None and chunk_size < seq_len_local:
+    if token_logprob_fn is not None:
+        probs = _token_logprobs_in_chunks(
+            vocab_parallel_logits.squeeze(0), rolled_targets.squeeze(0), chunk_size, token_logprob_fn
+        ).unsqueeze(0)
+    elif chunk_size is not None and chunk_size < seq_len_local:
         probs: torch.Tensor = ChunkedDistributedLogprob.apply(  # type: ignore
             vocab_parallel_logits,
             rolled_targets,
