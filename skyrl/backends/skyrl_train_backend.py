@@ -151,6 +151,8 @@ def _build_skyrl_train_config(
         user_overrides["trainer.policy.model.lora.train_attn"] = lora_config.train_attn
         user_overrides["trainer.policy.model.lora.train_mlp"] = lora_config.train_mlp
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
+    if cfg.isoexec is not None:
+        raise ValueError("`isoexec` requires the RL training entrypoint; the Tinker backend does not support it")
     lora = cfg.trainer.policy.model.lora
     if lora.rank > 0:
         # Fail before Ray starts or any GPU is reserved. The worker repeats this and adds the

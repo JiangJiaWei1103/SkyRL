@@ -290,7 +290,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     args.enable_sleep_mode = cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync
     args.enable_return_routed_experts = ie_cfg.enable_return_routed_experts
     args.weight_transfer_config = WeightTransferConfig(
-        backend=get_vllm_receive_backend(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
+        backend=ie_cfg.weight_transfer_backend
+        or get_vllm_receive_backend(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
     )
     # Sample-support capture asks for one logprob per top-k candidate, post-filter, so the
     # -inf entries that mark filtered candidates survive to the capture path.

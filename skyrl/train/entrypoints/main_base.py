@@ -274,6 +274,9 @@ class BasePPOExp:
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
+        if self.cfg.isoexec is not None:
+            from isoexec.integrations.skyrl.workers import PolicyWorker, RefWorker
+
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()

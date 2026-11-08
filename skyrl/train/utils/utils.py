@@ -454,6 +454,17 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     _apply_mtp_config(cfg)
     _validate_draft_weight_sync_cfg(cfg)
 
+    if cfg.isoexec is not None:
+        try:
+            from isoexec.integrations.skyrl.bootstrap import (
+                validate_config as validate_isoexec_config,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name == "isoexec":
+                raise RuntimeError("Setting `isoexec` requires the IsoExec package in the driver environment") from exc
+            raise
+        validate_isoexec_config(cfg)
+
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
         PolicyLossRegistry,
@@ -1289,6 +1300,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
 
+    env_vars.update(cfg.trainer.extra_runtime_env_vars)
     return env_vars
 
 

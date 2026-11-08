@@ -1438,6 +1438,9 @@ class InferenceEngineConfig(BaseConfig):
     """Backend used for weight synchronization.
     Use ``"nccl"`` (colocated ``nccl`` uses CUDA IPC internally), or ``"delta"`` for checkpoint-delta sync through
     shared storage in non-colocated vLLM runs. See https://docs.skyrl.ai/docs/examples/delta_weight_sync"""
+    weight_transfer_backend: Optional[str] = None
+    """vLLM weight-transfer receive engine the servers are built with. ``None`` selects SkyRL's own engine for the
+    resolved weight-sync strategy (``skyrl_nccl`` / ``skyrl_ipc``); a vLLM plugin may register another name."""
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """Size (GB) of the reusable packed buffer the trainer streams weights through.
 
@@ -1839,6 +1842,12 @@ class TrainerConfig(BaseConfig):
     ``trainer/flops_per_token`` and, under full activation recompute, ``trainer/hfu_est``. Megatron
     only; not logged for LoRA or with active MTP heads, and the utilization ratios are not logged for
     FP8 training or on GPUs without a known peak."""
+    extra_runtime_env_vars: Dict[str, str] = field(default_factory=dict)
+    """Environment variables added, after the ones SkyRL derives from the config, to the Ray runtime env of every
+    actor SkyRL starts (trainer workers and inference engines)."""
+    worker_options: Dict[str, Any] = field(default_factory=dict)
+    """Opaque options for the policy/ref worker classes a configuration selects (for example ``isoexec``). SkyRL
+    only carries them to the workers inside this config."""
     tags: Optional[List[str]] = None
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
@@ -2165,6 +2174,10 @@ class SkyRLTrainConfig(BaseConfig):
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
+    isoexec: Optional[Dict[str, Any]] = None
+    """Opt in to IsoExec-built Megatron and vLLM models with the package-owned options (``model_package``, ...).
+    ``None`` keeps SkyRL's native models. The IsoExec package validates this mapping, selects the worker classes
+    and configures the inference engine; it must be installed in the driver, trainer and engine environments."""
 
     def __post_init__(self):
 
