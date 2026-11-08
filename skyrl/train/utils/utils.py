@@ -419,6 +419,20 @@ def validate_optimizer_offload_to_disk_cfg(cfg: SkyRLTrainConfig):
         raise ValueError("optimizer_offload_to_disk requires a local trainer.ckpt_path.")
 
 
+def _validate_isoexec_cfg(cfg: SkyRLTrainConfig) -> None:
+    if cfg.isoexec is None:
+        return
+    try:
+        from isoexec.integrations.skyrl.bootstrap import (
+            validate_config as validate_isoexec_config,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name == "isoexec":
+            raise RuntimeError("Setting `isoexec` requires the IsoExec package in the driver environment") from exc
+        raise
+    validate_isoexec_config(cfg)
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -453,17 +467,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     # side (vLLM MTP speculative decoding) so both stay consistent.
     _apply_mtp_config(cfg)
     _validate_draft_weight_sync_cfg(cfg)
-
-    if cfg.isoexec is not None:
-        try:
-            from isoexec.integrations.skyrl.bootstrap import (
-                validate_config as validate_isoexec_config,
-            )
-        except ModuleNotFoundError as exc:
-            if exc.name == "isoexec":
-                raise RuntimeError("Setting `isoexec` requires the IsoExec package in the driver environment") from exc
-            raise
-        validate_isoexec_config(cfg)
+    _validate_isoexec_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
