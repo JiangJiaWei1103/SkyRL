@@ -22,6 +22,32 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
   FP8 spec (`weight_sync/fp8/models/beam.py`); see `patches/megatron/README.md`. Tiny-model GPU rows: `beam-tiny_*` in
   `gpu_ci/megatron/test_megatron_{,lora_}models.py` (`megatron_tiny_models/create_beam_tiny.py`).
 
+## Model-construction seams
+
+`MegatronPolicyWorkerBase.init_model` / `MegatronRefWorkerBase.init_model` own the worker lifecycle (config identity,
+download/barrier, profiler, CPU-offload optimizer threads, scheduler, CUDA-cache flags, allocator). A model
+implementation that is not built by Megatron-Bridge plugs in by subclassing the workers and overriding only these
+methods; it must not override `init_model`:
+
+- `MegatronWorker.strategy_cls` (class attribute): the `MegatronStrategy` subclass to construct.
+  `MegatronStrategy.get_nccl_communicator_config()` is the hook for a per-communicator NCCL YAML.
+- `init_configs(...)`: set `strategy.hf_config`, `tokenizer`, `megatron_config`, `is_vlm`, `enable_router_replay`,
+  `enable_sample_support_replay`, `_logical_model_path`, and `provider`/`bridge` (`None` when there is no bridge).
+- `make_megatron_module(wrap_with_ddp, ddp_config, ..., enable_router_replay, freeze_moe_router_params,
+  freeze_dsa_indexer_params)`: return the `List[nn.Module]` (DDP-wrapped when training). The provider-side hooks
+  (router replay patch, router/indexer freezing, LoRA) live here, so an override that cannot honor a flag refuses it.
+- `_build_optimizer()` (policy): return the Megatron optimizer over `self.actor_module`.
+- `_build_model_wrapper()` (policy and ref): return the `MegatronModelWrapper` (or subclass).
+- `_build_weight_source(dtype, backend)`: the weight-sync `WeightSource`.
+
+`MegatronModelWrapper` exposes `_scale_logits`, `_packed_logprobs`, `_observe_forward` and `_finalize_model_grads`
+for the same purpose; `model_utils.from_parallel_logits_to_logprobs_packed_sequences(token_logprob_fn=...)` swaps the
+per-token log-probability op while keeping SkyRL's packing/CP scatter. `provider is None` is handled explicitly:
+`model_flops` reports why MFU is skipped, and HF export / the MTP draft source raise.
+
+The in-tree user of these seams is IsoExec (`isoexec.integrations.skyrl.workers`), selected by the root `isoexec`
+config mapping; see `tests/backends/skyrl_train/workers/megatron/test_init_model_seams.py` for the call order.
+
 ## Optimizer state on disk
 
 `megatron_config.optimizer_offload_to_disk` (`skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py`):
