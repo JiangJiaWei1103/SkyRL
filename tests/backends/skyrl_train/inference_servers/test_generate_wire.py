@@ -4,6 +4,7 @@ import base64
 import json
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import orjson
@@ -15,9 +16,12 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedArrayKey,
     PackedField,
     build_logprobs_content,
+    decode_packed_full_logprobs,
     decode_packed_routed_experts,
     decode_packed_sample_support,
+    full_logprob_rows,
     load_packed_body,
+    pack_full_logprobs,
     pack_ndarray,
     pack_routed_experts,
     pack_sample_support,
@@ -505,3 +509,81 @@ def test_sample_support_logprobs_must_match_the_members():
         decode_packed_sample_support(pack_sample_support(support), short)
     with pytest.raises(ValueError, match="carries no member logprobs"):
         pack_sample_support_logprobs(csr([[1, 2]]))
+
+
+class _FullRow:
+    def __init__(self, values):
+        self._values = values
+
+    def __array__(self, dtype=None, copy=None):
+        return self._values if dtype is None else self._values.astype(dtype, copy=False)
+
+
+def _flat(token_ids, rows):
+    ids = np.concatenate([[tid, *order] for tid, order in zip(token_ids, [np.argsort(-row) for row in rows])])
+    values = np.concatenate([[row[tid], *np.sort(row)[::-1]] for tid, row in zip(token_ids, rows)]).astype(np.float32)
+    return SimpleNamespace(token_ids=ids, logprobs=values)
+
+
+def test_full_logprobs_round_trip_without_changing_float32_bits():
+    values = np.array(
+        [[-3.0, np.nextafter(np.float32(-0.25), np.float32(0.0)), -2.0], [-4.0, -5.0, -0.75]], dtype=np.float32
+    )
+    token_ids = [1, 2]
+    sampled = values[np.arange(2), token_ids].tolist()
+
+    raw = orjson.dumps(_body(full_logprobs=pack_full_logprobs(values)))
+    envelope = load_packed_body(raw)["choices"][0][PackedField.FULL_LOGPROBS]
+    decoded = decode_packed_full_logprobs(envelope, token_ids, sampled)
+
+    assert isinstance(envelope[PackedArrayKey.DATA], memoryview)
+    assert decoded.tobytes() == values.tobytes()
+
+
+@pytest.mark.parametrize(
+    "token_ids, sampled, message",
+    [
+        ([1, 2], [-3.0, -5.0], "differ"),
+        ([1], [-0.25], "rows for"),
+        ([1, 7], [-0.25, -0.75], "inside"),
+        ([1, 2], None, "one sampled logprob"),
+    ],
+)
+def test_decode_full_logprobs_rejects_inconsistent_sampled_values(token_ids, sampled, message):
+    values = np.array([[-3.0, -0.25, -2.0], [-4.0, -5.0, -0.75]], dtype=np.float32)
+    with pytest.raises(ValueError, match=message):
+        decode_packed_full_logprobs(pack_full_logprobs(values), token_ids, sampled)
+
+
+def test_pack_full_logprobs_refuses_non_finite_rows():
+    with pytest.raises(ValueError, match="finite"):
+        pack_full_logprobs(np.array([[-1.0, float("-inf")]], dtype=np.float32))
+
+
+def test_full_logprob_rows_reorders_flat_sampled_first_rows_by_token_id():
+    rows = np.array([[-3.0, -1.0, -2.0], [-4.0, -6.0, -5.0]], dtype=np.float32)
+    token_ids = [1, 0]
+
+    assert full_logprob_rows(_flat(token_ids, rows), token_ids, vocab_size=3).tobytes() == rows.tobytes()
+
+
+def test_full_logprob_rows_refuses_rows_that_do_not_name_every_token_once():
+    flat = SimpleNamespace(
+        token_ids=np.array([1, 1, 1, 0]), logprobs=np.array([-1.0, -1.0, -1.0, -3.0], dtype=np.float32)
+    )
+    with pytest.raises(ValueError, match="exactly once"):
+        full_logprob_rows(flat, [1], vocab_size=3)
+    with pytest.raises(ValueError, match="response tokens"):
+        full_logprob_rows(_flat([1, 0], np.ones((2, 3), dtype=np.float32)), [0, 0], vocab_size=3)
+
+
+def test_full_logprob_rows_accepts_mapping_array_and_array_protocol_rows():
+    rows = np.array([[-3.0, -1.0, -2.0], [-4.0, -6.0, -5.0]], dtype=np.float32)
+    per_position = [
+        {tid: _Logprob(float(value)) for tid, value in enumerate(rows[0])},
+        _FullRow(rows[1]),
+    ]
+    assert full_logprob_rows(per_position, [1, 0], vocab_size=3).tobytes() == rows.tobytes()
+    assert full_logprob_rows([rows[0], rows[1]], [1, 0], vocab_size=3).tobytes() == rows.tobytes()
+    with pytest.raises(ValueError, match="names 2 tokens"):
+        full_logprob_rows([{0: _Logprob(-1.0), 1: _Logprob(-2.0)}], [0], vocab_size=3)

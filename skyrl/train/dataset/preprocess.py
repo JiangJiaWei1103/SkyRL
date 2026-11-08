@@ -382,6 +382,29 @@ def convert_prompts_responses_to_batch_tensors(
     )
 
 
+def right_align_full_logprobs(
+    full_logprobs: List[np.ndarray], response_width: int
+) -> Float[torch.Tensor, "batch response_len vocab_size"]:
+    """Right-align per-trajectory ``[response_len_i, vocab_size]`` float32 rows into one batch tensor."""
+    if not isinstance(full_logprobs, list) or not full_logprobs:
+        raise TypeError("rollout_full_logprobs must be a non-empty list of NumPy arrays")
+    vocab_size = None
+    for rows in full_logprobs:
+        if not isinstance(rows, np.ndarray) or rows.ndim != 2 or rows.dtype != np.float32 or rows.shape[1] == 0:
+            raise ValueError("each rollout_full_logprobs entry must be a [response_len, vocab_size] float32 array")
+        if rows.shape[0] > response_width:
+            raise ValueError(f"rollout_full_logprobs has {rows.shape[0]} rows for a response width of {response_width}")
+        if vocab_size is None:
+            vocab_size = rows.shape[1]
+        elif rows.shape[1] != vocab_size:
+            raise ValueError("rollout_full_logprobs entries use different vocabulary sizes")
+    aligned = np.zeros((len(full_logprobs), response_width, vocab_size), dtype=np.float32)
+    for i, rows in enumerate(full_logprobs):
+        if rows.shape[0]:
+            aligned[i, response_width - rows.shape[0] :] = rows
+    return torch.from_numpy(aligned)
+
+
 def compute_prompt_boundaries(uids: List[str]) -> List[Tuple[int, int]]:
     """Compute per-prompt ``(start, end)`` slices from a flat ``uids`` list.
 

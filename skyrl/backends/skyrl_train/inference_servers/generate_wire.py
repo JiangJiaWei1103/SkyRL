@@ -14,7 +14,7 @@ raw response without materializing a large Python ``str``.
 import math
 from collections import deque
 from enum import StrEnum
-from typing import Any, Collection, Iterable, Mapping, Optional, Tuple
+from typing import Any, Collection, Iterable, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import orjson
@@ -47,6 +47,7 @@ class PackedArrayKey(StrEnum):
 class PackedField(StrEnum):
     """Response-body fields whose value is a packed-array envelope."""
 
+    FULL_LOGPROBS = "full_logprobs"
     ROUTED_EXPERTS = "routed_experts"
     ROLLOUT_SAMPLE_SUPPORT = "rollout_sample_support"
     # float32 sampler logprob of each support member, in the support's member order.
@@ -69,6 +70,9 @@ _ENVELOPE_KEYS = frozenset(PackedArrayKey)
 
 _ROUTED_EXPERTS_NDIM = 3
 _SAMPLE_SUPPORT_NDIM = 1
+_FULL_LOGPROBS_NDIM = 2
+FULL_LOGPROBS_DTYPE = np.dtype("<f4")
+_FULL_LOGPROBS_DTYPES = frozenset({FULL_LOGPROBS_DTYPE})
 _SAMPLE_SUPPORT_LOGPROBS_DTYPES = frozenset({SAMPLE_SUPPORT_LOGPROBS_DTYPE})
 
 _QUOTE = b'"'
@@ -249,6 +253,105 @@ def decode_packed_sample_support(
     return CompactSampleSupport.from_token_ids(
         decoded[num_rows:], decoded[:num_rows], top_k=top_k, logprobs=member_logprobs
     )
+
+
+def _full_logprob_row(row: Any, vocab_size: int) -> np.ndarray:
+    if isinstance(row, np.ndarray) or hasattr(row, "__array__"):
+        values = np.asarray(row, dtype=FULL_LOGPROBS_DTYPE)
+        if values.shape != (vocab_size,):
+            raise ValueError(f"full logprob row has shape {values.shape}, expected ({vocab_size},)")
+        return values
+    if isinstance(row, Mapping):
+        if len(row) != vocab_size:
+            raise ValueError(f"full logprob row names {len(row)} tokens, expected {vocab_size}")
+        try:
+            return np.fromiter(
+                (row[tid].logprob for tid in range(vocab_size)), dtype=FULL_LOGPROBS_DTYPE, count=vocab_size
+            )
+        except (KeyError, AttributeError, TypeError) as exc:
+            raise ValueError("full logprob row must map every token id to an entry with a logprob") from exc
+    raise ValueError(f"unsupported full logprob row type {type(row).__name__}")
+
+
+def full_logprob_rows(logprobs: Any, token_ids: Sequence[int], vocab_size: int) -> np.ndarray:
+    """Return the ``[tokens, vocab_size]`` float32 matrix behind a ``logprobs=-1`` response.
+
+    Accepts vLLM's flat form (``token_ids``/``logprobs`` arrays holding one sampled-first,
+    rank-ordered row per position) or one row object per position: a float32 array in token-id
+    order, anything exposing ``__array__`` as such an array, or a mapping from token id to an entry
+    with a ``logprob`` attribute. Every row must name each token exactly once and be finite.
+    """
+    num_tokens = len(token_ids)
+    if vocab_size <= 0:
+        raise ValueError("full logprobs need a positive vocabulary size")
+    if any(
+        isinstance(tid, bool) or not isinstance(tid, (int, np.integer)) or not 0 <= tid < vocab_size
+        for tid in token_ids
+    ):
+        raise ValueError("response token ids must lie inside the vocabulary")
+    rows = np.full((num_tokens, vocab_size), np.nan, dtype=FULL_LOGPROBS_DTYPE)
+    flat_ids = getattr(logprobs, "token_ids", None)
+    flat_values = getattr(logprobs, "logprobs", None)
+    if flat_ids is not None and flat_values is not None and not isinstance(logprobs, (list, tuple)):
+        ids = np.asarray(flat_ids)
+        values = np.asarray(flat_values, dtype=FULL_LOGPROBS_DTYPE)
+        if num_tokens == 0:
+            if ids.size:
+                raise ValueError("flat logprobs carry rows for an empty response")
+            return rows
+        if ids.shape != values.shape or ids.ndim != 1 or ids.size % num_tokens:
+            raise ValueError("flat logprobs do not divide into one row per response token")
+        width = ids.size // num_tokens
+        ids = ids.reshape(num_tokens, width)
+        values = values.reshape(num_tokens, width)
+        if width == vocab_size + 1:
+            if not np.array_equal(ids[:, 0], np.asarray(token_ids, dtype=ids.dtype)):
+                raise ValueError("sampled-first flat rows do not name the response tokens")
+            ids, values = ids[:, 1:], values[:, 1:]
+        elif width != vocab_size:
+            raise ValueError(f"flat logprob rows have {width} entries for a vocabulary of {vocab_size}")
+        if ids.dtype.kind not in "iu" or ids.size and (int(ids.min()) < 0 or int(ids.max()) >= vocab_size):
+            raise ValueError("flat logprob rows name a token outside the vocabulary")
+        rows[np.arange(num_tokens)[:, None], ids] = values
+    else:
+        if logprobs is None or len(logprobs) != num_tokens:
+            raise ValueError("full logprobs must contain one row per response token")
+        for index, row in enumerate(logprobs):
+            rows[index] = _full_logprob_row(row, vocab_size)
+    if not np.isfinite(rows).all():
+        raise ValueError("full logprobs must name every vocabulary token exactly once with a finite value")
+    return rows
+
+
+def pack_full_logprobs(rows: np.ndarray) -> dict[str, Any]:
+    """Encode ``[tokens, vocab_size]`` float32 rows without changing a bit."""
+    if not isinstance(rows, np.ndarray) or rows.ndim != _FULL_LOGPROBS_NDIM or rows.shape[1] == 0:
+        raise ValueError("full logprobs must be a [tokens, vocab_size] array with a non-empty vocabulary")
+    rows = rows.astype(FULL_LOGPROBS_DTYPE, copy=False)
+    if not np.isfinite(rows).all():
+        raise ValueError("full logprobs must be finite")
+    return pack_ndarray(rows, allowed_dtypes=_FULL_LOGPROBS_DTYPES)
+
+
+def decode_packed_full_logprobs(
+    payload: Mapping[str, Any], token_ids: Sequence[int], response_logprobs: Optional[Sequence[float]]
+) -> np.ndarray:
+    """Decode rows and check them against the separately transported sampled logprobs."""
+    rows, _ = unpack_ndarray(payload, allowed_dtypes=_FULL_LOGPROBS_DTYPES, ndim=_FULL_LOGPROBS_NDIM)
+    if rows.shape[1] == 0:
+        raise ValueError("packed full_logprobs has an empty vocabulary")
+    if rows.shape[0] != len(token_ids):
+        raise ValueError(f"packed full_logprobs has {rows.shape[0]} rows for {len(token_ids)} response tokens")
+    if response_logprobs is None or len(response_logprobs) != len(token_ids):
+        raise ValueError("full_logprobs require one sampled logprob per response token")
+    if not np.isfinite(rows).all():
+        raise ValueError("packed full_logprobs must be finite")
+    if any(isinstance(tid, bool) or not isinstance(tid, int) or not 0 <= tid < rows.shape[1] for tid in token_ids):
+        raise ValueError("response token ids must lie inside the full_logprobs vocabulary")
+    sampled = rows[np.arange(len(token_ids)), token_ids]
+    if sampled.tobytes() != np.asarray(response_logprobs, dtype=FULL_LOGPROBS_DTYPE).tobytes():
+        raise ValueError("sampled logprobs differ from their full_logprobs entries")
+    return rows
 
 
 def _data_prefix(field: str) -> bytes:

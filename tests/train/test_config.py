@@ -1913,3 +1913,47 @@ def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, m
 
     with pytest.raises(ValueError, match=match):
         validate_optimizer_offload_to_disk_cfg(cfg)
+
+
+def _full_logprob_cfg(*overrides):
+    return SkyRLTrainConfig.from_cli_overrides(list(overrides))
+
+
+_FULL_LOGPROB_BASE = (
+    "generator.inference_engine.enable_return_full_logprobs=true",
+    "generator.inference_engine.logprobs_mode=raw_logprobs",
+    "generator.batched=true",
+)
+
+
+def test_full_logprobs_side_channel_accepts_its_minimal_config():
+    cfg = _full_logprob_cfg(*_FULL_LOGPROB_BASE)
+    assert cfg.generator.inference_engine.enable_return_full_logprobs
+    assert cfg.generator.inference_engine.logprobs_mode == "raw_logprobs"
+    assert _full_logprob_cfg(
+        "generator.inference_engine.logprobs_mode=raw_logprobs"
+    ).generator.inference_engine.logprobs_mode == ("raw_logprobs")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ("generator.inference_engine.enable_return_full_logprobs=true", "generator.batched=true"),
+        (
+            "generator.inference_engine.enable_return_full_logprobs=true",
+            "generator.inference_engine.logprobs_mode=raw_logprobs",
+        ),
+        (*_FULL_LOGPROB_BASE, "generator.sampling_params.logprobs=null"),
+        (
+            *_FULL_LOGPROB_BASE,
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=2",
+        ),
+        (*_FULL_LOGPROB_BASE, "generator.max_turns=2"),
+        (*_FULL_LOGPROB_BASE, "generator.step_wise_trajectories=true"),
+        (*_FULL_LOGPROB_BASE, "generator.vision_language_generator=true"),
+    ],
+)
+def test_full_logprobs_side_channel_refuses_unsupported_settings(overrides):
+    with pytest.raises(ValueError, match="enable_return_full_logprobs"):
+        _full_logprob_cfg(*overrides)

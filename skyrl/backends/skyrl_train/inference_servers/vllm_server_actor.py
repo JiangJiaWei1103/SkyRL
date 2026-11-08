@@ -44,6 +44,8 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     PackedField,
     build_logprobs_content,
+    full_logprob_rows,
+    pack_full_logprobs,
     pack_routed_experts,
     pack_sample_support,
     pack_sample_support_logprobs,
@@ -602,6 +604,22 @@ class VLLMServerActor(ServerActorProtocol):
                     status_code=400,
                     detail="return_sample_support_logprobs requires return_sample_support",
                 )
+            return_full_logprobs = body.get("return_full_logprobs", False)
+            if not isinstance(return_full_logprobs, bool):
+                raise HTTPException(status_code=400, detail="return_full_logprobs must be a boolean")
+            if return_full_logprobs:
+                if capture_sample_support:
+                    raise HTTPException(
+                        status_code=400, detail="return_full_logprobs cannot be combined with return_sample_support"
+                    )
+                if getattr(engine.model_config, "logprobs_mode", None) != "raw_logprobs":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="return_full_logprobs requires an engine started with logprobs_mode='raw_logprobs'",
+                    )
+                sampling_params_dict["logprobs"] = -1
+                if not sampling_params_dict.get("stop"):
+                    sampling_params_dict.setdefault("detokenize", False)
             if capture_sample_support:
                 # Sample support requires a bounded, non-degenerate top-k set.
                 top_k = sampling_params_dict.get("top_k")
@@ -650,7 +668,16 @@ class VLLMServerActor(ServerActorProtocol):
             logprobs = None
             packed_sample_support = None
             packed_sample_support_logprobs = None
-            if capture_sample_support:
+            packed_full_logprobs = None
+            if return_full_logprobs:
+                try:
+                    rows = full_logprob_rows(resp.logprobs, token_ids_out, engine.model_config.get_vocab_size())
+                except ValueError as error:
+                    raise HTTPException(status_code=500, detail=f"full_logprobs: {error}") from error
+                packed_full_logprobs = pack_full_logprobs(rows)
+                sampled = rows[np.arange(len(token_ids_out)), token_ids_out]
+                logprobs = {"content": [{"logprob": float(value)} for value in sampled]}
+            elif capture_sample_support:
                 content, sample_support = _sample_support_from_flat_logprobs(
                     resp.logprobs,
                     sampling_params_dict["top_k"],
@@ -682,6 +709,7 @@ class VLLMServerActor(ServerActorProtocol):
                         PackedField.ROUTED_EXPERTS.value: routed_experts,
                         PackedField.ROLLOUT_SAMPLE_SUPPORT.value: packed_sample_support,
                         PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS.value: packed_sample_support_logprobs,
+                        PackedField.FULL_LOGPROBS.value: packed_full_logprobs,
                     }
                 ]
             }

@@ -2314,3 +2314,44 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
         # The environment is ~3x slower than the engine here, so a swapped attribution would flip this.
         assert env_t > llm_t
         assert llm_t + env_t <= e2e_t + 1e-6
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_truncates_full_logprobs_with_response(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.sampling_params.logprobs = 1
+    generator_cfg.sampling_params.max_generate_length = 2
+    generator_cfg.inference_engine.enable_return_full_logprobs = True
+    generator_cfg.inference_engine.logprobs_mode = "raw_logprobs"
+    full_rows = np.arange(len(MOCK_LLM_OUTPUT_IDS) * 3, dtype=np.float32).reshape(len(MOCK_LLM_OUTPUT_IDS), 3)
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["mocked output"],
+            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.1] * len(MOCK_LLM_OUTPUT_IDS)],
+            "response_full_logprobs": [full_rows],
+        }
+    )
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    output = await generator.generate(
+        {
+            "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
+            "env_extras": [{"answer": "8"}],
+            "env_classes": [mock_env_cfg.env_class],
+        }
+    )
+
+    assert mock_llm.generate.await_args.args[0]["return_full_logprobs"] is True
+    assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS[:2]]
+    assert output["rollout_full_logprobs"][0].tobytes() == full_rows[:2].tobytes()

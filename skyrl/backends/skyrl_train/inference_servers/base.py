@@ -1,5 +1,17 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, Tuple, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Hashable,
+    List,
+    NotRequired,
+    Optional,
+    Tuple,
+    TypedDict,
+)
+
+import numpy as np
 
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
@@ -35,6 +47,8 @@ class InferenceEngineInput(TypedDict):
     routed_experts_prompt_starts: Optional[List[int]]
     # Per-batch opt-in; the engine must enable sample-support capture at startup.
     return_sample_support: Optional[bool]
+    # Per-batch opt-in; the engine must enable full-vocabulary logprobs at startup.
+    return_full_logprobs: NotRequired[Optional[bool]]
 
 
 class InferenceEngineOutput(TypedDict):
@@ -49,6 +63,8 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    # One [response_len, vocab_size] float32 matrix per prompt when full logprobs were requested.
+    response_full_logprobs: NotRequired[Optional[List[np.ndarray]]]
     prompt_logprobs: Optional[List[List[float]]]  # per-prompt-token logprobs under the current model
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
     # One CSR support block, with a row per generated token, per prompt.

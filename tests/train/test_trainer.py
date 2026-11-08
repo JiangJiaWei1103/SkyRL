@@ -63,6 +63,75 @@ def dummy_generator():
     return MagicMock()
 
 
+def _bare_trainer(cfg: SkyRLTrainConfig) -> RayPPOTrainer:
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = cfg
+    trainer.cfg.trainer.critic.model.path = None
+    trainer.tokenizer = MagicMock(pad_token_id=0)
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 1
+    trainer.all_metrics = {}
+    trainer.ref_model = None
+    return trainer
+
+
+def test_convert_to_training_input_right_aligns_full_logprob_rows(dummy_config):
+    dummy_config.trainer.policy_mini_batch_size = 2
+    trainer = _bare_trainer(dummy_config)
+    full_short = np.array([[-1.0, -2.0, -3.0], [-4.0, -5.0, -6.0]], dtype=np.float32)
+    full_long = np.array([[-7.0, -8.0, -9.0], [-10.0, -11.0, -12.0], [-13.0, -14.0, -15.0]], dtype=np.float32)
+    generator_output = {
+        "prompt_token_ids": [[10], [20, 21]],
+        "response_ids": [[11, 12], [22, 23, 24]],
+        "rewards": [[0.0, 1.0], [0.0, 0.0, 1.0]],
+        "loss_masks": [[1, 1], [1, 1, 1]],
+        "rollout_logprobs": [[-1.0, -2.0], [-3.0, -4.0, -5.0]],
+        "rollout_full_logprobs": [full_short, full_long],
+    }
+
+    training_input = trainer.convert_to_training_input(generator_output, ["a", "b"])
+
+    rows = training_input["rollout_full_logprobs"]
+    assert rows.shape == (2, 3, 3)
+    torch.testing.assert_close(rows[0, 0], torch.zeros(3))
+    torch.testing.assert_close(rows[0, 1:], torch.from_numpy(full_short))
+    torch.testing.assert_close(rows[1], torch.from_numpy(full_long))
+    assert training_input["rollout_logprobs"][0].tolist() == [0.0, -1.0, -2.0]
+
+
+def test_fwd_logprobs_hands_full_rows_to_the_policy_forward_once_and_drops_them():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.algorithm.policy_loss_type = "regular"
+    trainer = _bare_trainer(cfg)
+    captured = {}
+
+    def forward(model, data, key, mini_batch_boundaries):
+        captured["model"] = model
+        captured["keys"] = set(data.keys())
+        captured["rows"] = data["rollout_full_logprobs"]
+        return torch.tensor([[-1.0, -2.0]])
+
+    trainer._execute_forward_pass = forward
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[10, 11, 12]]),
+            "attention_mask": torch.ones((1, 3), dtype=torch.long),
+            "loss_mask": torch.ones((1, 2)),
+            "rollout_logprobs": torch.tensor([[-1.0, -2.0]]),
+            "rollout_full_logprobs": torch.zeros((1, 2, 4)),
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    trainer.fwd_logprobs_values_reward(batch)
+
+    assert captured["model"] == "policy"
+    assert {"rollout_full_logprobs", "rollout_logprobs", "loss_mask"} <= captured["keys"]
+    assert captured["rows"].shape == (1, 2, 4)
+    assert batch["rollout_full_logprobs"] is None
+    assert batch["action_log_probs"].tolist() == [[-1.0, -2.0]]
+
+
 def _get_test_data(trainer: RayPPOTrainer):
     trainer.critic_model = MagicMock()  # pretend we're using a critic
 

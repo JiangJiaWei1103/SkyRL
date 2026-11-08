@@ -912,6 +912,12 @@ class MegatronWorker:
                     **vlm_inputs,
                 }
             )
+            if micro.get("rollout_full_logprobs") is not None:
+                micro_dicts[-1].update(
+                    rollout_full_logprobs=micro["rollout_full_logprobs"],
+                    rollout_logprobs=micro.get("rollout_logprobs"),
+                    loss_mask=micro.get("loss_mask"),
+                )
 
         if use_token_batching:
             # Pad microbatches to uniform batch size for Megatron compatibility

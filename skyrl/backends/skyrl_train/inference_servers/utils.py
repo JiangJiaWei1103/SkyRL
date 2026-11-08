@@ -128,11 +128,13 @@ def _apply_serialized_fp8_weight_sync_defaults(
     engine_kwargs["hf_overrides"] = hf_overrides
 
 
-def _validate_logprobs_mode(engine_kwargs: Dict[str, Any], *, context: str) -> None:
-    """Raises if *engine_kwargs* sets ``logprobs_mode`` to anything but ``VLLM_LOGPROBS_MODE``."""
-    logprobs_mode = engine_kwargs.get("logprobs_mode", VLLM_LOGPROBS_MODE)
-    if logprobs_mode != VLLM_LOGPROBS_MODE:
-        raise ValueError(f"{context}.logprobs_mode must be {VLLM_LOGPROBS_MODE!r}, got {logprobs_mode!r}.")
+def _validate_logprobs_mode(
+    engine_kwargs: Dict[str, Any], *, context: str, logprobs_mode: str = VLLM_LOGPROBS_MODE
+) -> None:
+    """Raises if *engine_kwargs* sets ``logprobs_mode`` to anything but the configured ``logprobs_mode``."""
+    requested = engine_kwargs.get("logprobs_mode", logprobs_mode)
+    if requested != logprobs_mode:
+        raise ValueError(f"{context}.logprobs_mode must be {logprobs_mode!r}, got {requested!r}.")
 
 
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
@@ -259,9 +261,8 @@ def _base_vllm_cli_args(model_path: str, ie_cfg: InferenceEngineConfig, seed: in
         # models with custom modeling code (MiMo, Qwen3.5, DeepSeek-V3, ...) require it to load.
         # Overridable via engine_init_kwargs.trust_remote_code below.
         trust_remote_code=True,
-        # Logprobs are computed from the sampling distribution (after temperature and top-k/top-p).
-        # Other values from engine kwargs are rejected by _validate_logprobs_mode.
-        logprobs_mode=VLLM_LOGPROBS_MODE,
+        # Conflicting values from engine kwargs are rejected by _validate_logprobs_mode.
+        logprobs_mode=ie_cfg.logprobs_mode,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -295,6 +296,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     # -inf entries that mark filtered candidates survive to the capture path.
     if ie_cfg.enable_return_sample_support_set:
         args.max_logprobs = cfg.generator.sampling_params.top_k
+    if ie_cfg.enable_return_full_logprobs:
+        args.max_logprobs = -1
 
     # The sharded_rdt backend pulls weight slices from a named trainer actor over
     # Ray's NIXL tensor transport, so the inference workers MUST be Ray actors.
@@ -346,7 +349,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
-    _validate_logprobs_mode(engine_kwargs, context="generator.inference_engine.engine_init_kwargs")
+    _validate_logprobs_mode(
+        engine_kwargs, context="generator.inference_engine.engine_init_kwargs", logprobs_mode=ie_cfg.logprobs_mode
+    )
     _apply_serialized_fp8_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,
@@ -379,7 +384,7 @@ def build_frozen_vllm_cli_args(model_path: str, ie_cfg: InferenceEngineConfig, s
     args.enable_sleep_mode = False
     args.enable_lora = False
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
-    _validate_logprobs_mode(engine_kwargs, context="engine_init_kwargs")
+    _validate_logprobs_mode(engine_kwargs, context="engine_init_kwargs", logprobs_mode=ie_cfg.logprobs_mode)
     _apply_engine_init_kwargs(args, engine_kwargs)
     return args
 
@@ -455,7 +460,11 @@ def get_pd_cli_args(
     args = copy.deepcopy(cli_args)
 
     if role_init_kwargs:
-        _validate_logprobs_mode(role_init_kwargs, context=f"generator.inference_engine.{role}_init_kwargs")
+        _validate_logprobs_mode(
+            role_init_kwargs,
+            context=f"generator.inference_engine.{role}_init_kwargs",
+            logprobs_mode=getattr(cli_args, "logprobs_mode", VLLM_LOGPROBS_MODE),
+        )
         for key, value in role_init_kwargs.items():
             if key == "additional_config":
                 # Merge instead of replacing: the base dict carries keys SkyRL derives itself

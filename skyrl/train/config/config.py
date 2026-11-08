@@ -1470,6 +1470,14 @@ class InferenceEngineConfig(BaseConfig):
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
     enable_return_sample_support_set: bool = False
     """Return the bounded sampler support used to renormalize rollout logprobs."""
+    enable_return_full_logprobs: bool = False
+    """Return every generated token's complete float32 vocabulary logprob row as a per-token side channel
+    (``rollout_full_logprobs``). Requires ``logprobs_mode="raw_logprobs"`` and ``generator.batched=true``; memory
+    scales with response tokens x vocabulary size."""
+    logprobs_mode: Literal["processed_logprobs", "raw_logprobs"] = "processed_logprobs"
+    """vLLM ``logprobs_mode``. ``processed_logprobs`` reports the sampling distribution (after temperature and
+    top-k/top-p). ``raw_logprobs`` reports the model's own log-softmax and is only correct when the served model
+    applies the sampling temperature itself."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -1517,8 +1525,8 @@ class InferenceEngineConfig(BaseConfig):
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine.
     Names must match the engine's args. Applied last, so they silently override config-derived
-    engine args (e.g. ``tensor_parallel_size``). The exception is ``logprobs_mode``, which is
-    always ``"processed_logprobs"``; any other value is rejected.
+    engine args (e.g. ``tensor_parallel_size``). ``logprobs_mode`` is set by the ``logprobs_mode``
+    field; a conflicting value here is rejected.
 
     For HuggingFace config overrides such as RoPE scaling, use
     ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
@@ -2201,6 +2209,24 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
             if self.generator.vision_language_generator:
                 raise ValueError("sample-support capture does not support vision_language_generator")
+
+        if self.generator.inference_engine.enable_return_full_logprobs:
+            ie_cfg = self.generator.inference_engine
+            if ie_cfg.logprobs_mode != "raw_logprobs":
+                raise ValueError(
+                    "enable_return_full_logprobs requires generator.inference_engine.logprobs_mode='raw_logprobs'"
+                )
+            if self.generator.sampling_params.logprobs is None:
+                raise ValueError("enable_return_full_logprobs requires generator.sampling_params.logprobs to be set")
+            if ie_cfg.enable_return_sample_support_set:
+                raise ValueError("enable_return_full_logprobs cannot be combined with enable_return_sample_support_set")
+            if not self.generator.batched or self.generator.max_turns != 1 or self.generator.step_wise_trajectories:
+                raise ValueError(
+                    "enable_return_full_logprobs requires generator.batched=true, generator.max_turns=1 and "
+                    "generator.step_wise_trajectories=false"
+                )
+            if self.generator.vision_language_generator:
+                raise ValueError("enable_return_full_logprobs does not support vision_language_generator")
 
         # The VLM generator does not populate routed-expert indices.
         if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:

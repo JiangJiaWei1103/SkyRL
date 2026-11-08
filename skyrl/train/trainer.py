@@ -58,6 +58,7 @@ from skyrl.train.dataset.preprocess import (
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
+    right_align_full_logprobs,
 )
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
@@ -951,6 +952,7 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+        full_logprobs = generator_output.get("rollout_full_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
         rollout_sample_support = generator_output.get("rollout_sample_support", None)
 
@@ -1013,6 +1015,11 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_full_logprobs": (
+                    right_align_full_logprobs(full_logprobs, loss_masks_tensor.shape[1])
+                    if full_logprobs is not None
+                    else None
+                ),
                 "rollout_expert_indices": rollout_expert_indices_tensor,
                 "router_padding_mask": router_padding_mask,
                 SAMPLE_SUPPORT_FIELD: rollout_sample_support_tensor,
@@ -1436,6 +1443,11 @@ class RayPPOTrainer:
         if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
             # The scorer validates that captured support backs every loss-active target.
             fwd_keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
+        if training_input.get("rollout_full_logprobs") is not None:
+            # The policy forward consumes the rows next to the sampled logprobs and loss mask; they are not kept.
+            fwd_keys.extend(
+                key for key in ("rollout_full_logprobs", "rollout_logprobs", "loss_mask") if key not in fwd_keys
+            )
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:
@@ -1474,6 +1486,8 @@ class RayPPOTrainer:
                 key="logprobs",
                 mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
             )
+        if "rollout_full_logprobs" in fwd_keys:
+            training_input["rollout_full_logprobs"] = None
 
         # Empty cache after all forward passes
         self.dispatch.empty_cache()
