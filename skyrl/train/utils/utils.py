@@ -423,14 +423,12 @@ def _validate_isoexec_cfg(cfg: SkyRLTrainConfig) -> None:
     if cfg.isoexec is None:
         return
     try:
-        from isoexec.integrations.skyrl.bootstrap import (
-            validate_config as validate_isoexec_config,
-        )
+        from isoexec.integrations.skyrl.bootstrap import validate_config
     except ModuleNotFoundError as exc:
         if exc.name == "isoexec":
             raise RuntimeError("Setting `isoexec` requires the IsoExec package in the driver environment") from exc
         raise
-    validate_isoexec_config(cfg)
+    validate_config(cfg)
 
 
 def validate_cfg(cfg: SkyRLTrainConfig):
