@@ -262,10 +262,13 @@ class MegatronStrategy(DistributedStrategy):
             expert_tensor_parallel_size=self.megatron_config.expert_tensor_parallel_size,
             use_sharp=False,
             context_parallel_size=self.megatron_config.context_parallel_size,
-            nccl_communicator_config_path=None,
+            nccl_communicator_config_path=self.get_nccl_communicator_config(),
         )
         self.set_seed(self.seed)
         self.world_size = dist.get_world_size()
+
+    def get_nccl_communicator_config(self) -> Optional[str]:
+        return None
 
     def offload_to_cpu(self, model, optimizer, offload_optimizer=True, offload_model=True):
         """

@@ -235,6 +235,7 @@ def default_cp_comm_type_for_sliding_window(config) -> None:
 
 
 class MegatronWorker:
+    strategy_cls = MegatronStrategy
     _mfu_warned = False
 
     def _maybe_setup_fake_int4_qat(self):
@@ -756,6 +757,9 @@ class MegatronWorker:
         lora_type: Optional[str] = "lora",
         experts_shared_outer_loras: bool = False,
         bf16: bool = True,
+        enable_router_replay: bool = False,
+        freeze_moe_router_params: bool = False,
+        freeze_dsa_indexer_params: bool = False,
     ) -> List[nn.Module]:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
@@ -763,6 +767,23 @@ class MegatronWorker:
         from megatron.core.distributed.distributed_data_parallel_config import (
             DistributedDataParallelConfig,
         )
+
+        if enable_router_replay:
+            from skyrl.backends.skyrl_train.utils.replay_utils import (
+                patch_topk_router_layer_number,
+            )
+
+            patch_topk_router_layer_number()
+
+        if freeze_moe_router_params:
+            if self._rank == 0:
+                logger.info("freeze_moe_router=True: freezing MoE router params")
+            self.provider.register_pre_wrap_hook(freeze_moe_router)
+
+        if freeze_dsa_indexer_params:
+            if self._rank == 0:
+                logger.info("freeze_dsa_indexer=True: freezing DSA indexer params")
+            self.provider.register_pre_wrap_hook(freeze_dsa_indexer)
 
         # TE patch to allow FA2 for head_dim 256 on SM103 (B300) and other arches
         # outside TE's allowlist. Still needed on 2.19.0: NVIDIA/TransformerEngine#3360
@@ -966,7 +987,8 @@ class MegatronWorker:
         (forward micro-batches carry neither key, so this is inert there). This is needed
         because Megatron's forward_backward_func requires uniform micro_batch_size across all
         microbatches (especially with PP > 1). Scalar keys (``num_actions``,
-        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged.
+        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged;
+        ``num_real_rows`` records how many leading rows are real.
         Ragged per-sample fields carried as a ``TensorList`` (``sub_seq_lengths``,
         ``pixel_values``, ``image_grid_thw``) grow by ``append_tensor_list_padding``.
 
@@ -980,9 +1002,9 @@ class MegatronWorker:
         pad_count = target_batch_size - current_bsz
         device = micro_dict["sequences"].device
 
-        padded = {}
+        padded = {"num_real_rows": micro_dict.get("num_real_rows", current_bsz)}
         for key, value in micro_dict.items():
-            if key in ("num_actions", "num_microbatches", "num_real_microbatches"):
+            if key in ("num_actions", "num_microbatches", "num_real_microbatches", "num_real_rows"):
                 padded[key] = value
                 continue
             if value is None:
@@ -1025,6 +1047,8 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
+        if self.bridge is None:
+            raise ValueError("HF export requires a Megatron-Bridge bridge; this worker's model was built without one")
         sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         # Save model in HuggingFace safetensors format
         hf_export = self.megatron_config.hf_export_config
@@ -1117,7 +1141,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.distributed.broadcast = _broadcast_no_grad
             torch.distributed._skyrl_broadcast_no_grad_patched = True
 
-        self.strategy = MegatronStrategy(
+        self.strategy = self.strategy_cls(
             megatron_config=self.cfg.policy.megatron_config,
             optimizer_config=self.cfg.policy.optimizer_config,
             seed=self.cfg.seed,
@@ -1157,28 +1181,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             enable_mtp=self.cfg.mtp.enabled,
         )
 
-        if self.enable_router_replay:
-            from skyrl.backends.skyrl_train.utils.replay_utils import (
-                patch_topk_router_layer_number,
-            )
-
-            patch_topk_router_layer_number()
-
-        # Freeze MoE router params before optimizer build.
-        # Megatron's DistributedOptimizer reads requires_grad at construction.
-        if self.cfg.policy.megatron_config.freeze_moe_router:
-            if self._rank == 0:
-                logger.info("freeze_moe_router=True: freezing MoE router params")
-            self.provider.register_pre_wrap_hook(freeze_moe_router)
-
-        # Freeze DSA indexer params before DDP buckets them: DDP decides bucket
-        # membership from requires_grad in its constructor, and overlap_grad_reduce
-        # asserts that every bucketed param's backward hook fired.
-        if self.cfg.policy.megatron_config.freeze_dsa_indexer:
-            if self._rank == 0:
-                logger.info("freeze_dsa_indexer=True: freezing DSA indexer params")
-            self.provider.register_pre_wrap_hook(freeze_dsa_indexer)
-
         # wrap with DDP for training
         wrap_with_ddp = not self.cfg.policy.inference_only_init
         self.actor_module = self.make_megatron_module(
@@ -1188,6 +1190,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
             experts_shared_outer_loras=self.cfg.policy.megatron_config.lora_config.experts_shared_outer_loras,
             bf16=self.cfg.bf16,
+            enable_router_replay=self.enable_router_replay,
+            freeze_moe_router_params=self.cfg.policy.megatron_config.freeze_moe_router,
+            freeze_dsa_indexer_params=self.cfg.policy.megatron_config.freeze_dsa_indexer,
         )
 
         if self._local_rank == 0 and not os.path.exists(
@@ -1215,16 +1220,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 cpu_threads = len(os.sched_getaffinity(0)) // max(1, self.cfg.placement.policy_num_gpus_per_node)
                 if torch.get_num_threads() < cpu_threads:
                     torch.set_num_threads(cpu_threads)
-            optim_config = init_megatron_optim_config(
-                self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
-            )
-            offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
-            offload_to_disk = None
-            if offload_cfg.dir is not None:
-                if self._is_lora:
-                    raise ValueError("optimizer_offload_to_disk does not support LoRA.")
-                offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
+            self.optimizer = self._build_optimizer()
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -1244,14 +1240,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     f"({n_local} head main params on rank {self._rank}; 0 is normal under DP sharding)"
                 )
 
-        # create worker model
-        self.model = MegatronModelWrapper(
-            config=self.cfg,
-            actor_module=self.actor_module,
-            actor_optimizer=self.optimizer,
-            policy_loss_fn=self.policy_loss_fn,
-            is_vlm=self.is_vlm,
-        )
+        self.model = self._build_model_wrapper()
 
         megatron_config = self.cfg.policy.megatron_config
         expandable_segments = self.cfg.use_expandable_segments
@@ -1261,6 +1250,27 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
         self._set_expandable_segments(True)
+
+    def _build_optimizer(self):
+        optim_config = init_megatron_optim_config(
+            self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
+        )
+        offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
+        offload_to_disk = None
+        if offload_cfg.dir is not None:
+            if self._is_lora:
+                raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+            offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
+        return get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
+
+    def _build_model_wrapper(self) -> MegatronModelWrapper:
+        return MegatronModelWrapper(
+            config=self.cfg,
+            actor_module=self.actor_module,
+            actor_optimizer=self.optimizer,
+            policy_loss_fn=self.policy_loss_fn,
+            is_vlm=self.is_vlm,
+        )
 
     def forward(
         self,
@@ -1766,6 +1776,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def _build_draft_weight_source(self, dtype: "torch.dtype"):
         """The MTP block plus the embedding and output layer the drafter shares with the policy."""
+        if self.bridge is None:
+            raise ValueError("The MTP draft weight source requires a Megatron-Bridge bridge")
         from skyrl.backends.skyrl_train.weight_sync.sources import (
             MegatronWeightSource,
             is_megatron_draft_param,
@@ -2234,7 +2246,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                 backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
-        self.strategy = MegatronStrategy(
+        self.strategy = self.strategy_cls(
             megatron_config=self.cfg.ref.megatron_config,
             optimizer_config=None,
             seed=self.cfg.seed,
@@ -2291,12 +2303,12 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
-        # create worker model
-        # Propagate is_vlm so ref forwards apply the same VLM image handling and
-        # parallelism guards as the policy worker.
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
+        self.model = self._build_model_wrapper()
 
         self._set_expandable_segments(True)
+
+    def _build_model_wrapper(self) -> MegatronModelWrapper:
+        return MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method

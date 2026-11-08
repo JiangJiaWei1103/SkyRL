@@ -69,6 +69,8 @@ def kpool_indexer_overcount(provider: Any, seqlen_sum: int, seqlen_squared_sum: 
 
 def unsupported_reason(provider: Any) -> Optional[str]:
     """Returns why the formula can't cost ``provider``'s model, or None if it can."""
+    if provider is None:
+        return "the model was not built from a Megatron-Bridge provider"
     if getattr(provider, "mtp_num_layers", None):
         return "MTP heads are active, and SkyRL trains them with a decoupled draft loss the formula does not model"
     if hasattr(provider, "qwen4_indexer_budget"):
