@@ -1413,6 +1413,7 @@ class RayPPOTrainer:
             and training_input.get("rollout_logprobs", None) is not None
             and not algorithm.use_kl_in_reward
             and not off_policy_correction_enabled(algorithm.off_policy_correction)
+            and algorithm.rollout_train_logprobs_abs_diff_max is None
         )
 
     @torch.no_grad()
@@ -1526,6 +1527,13 @@ class RayPPOTrainer:
                         "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
                     }
                 )
+                bound = self.cfg.trainer.algorithm.rollout_train_logprobs_abs_diff_max
+                if bound is not None and (not torch.isfinite(logprobs_diff).all() or logprobs_diff_max > bound):
+                    raise RuntimeError(
+                        f"rollout/trainer logprob mismatch at step {self.global_step}: max abs diff "
+                        f"{logprobs_diff_max} exceeds trainer.algorithm.rollout_train_logprobs_abs_diff_max={bound} "
+                        f"(mean {logprobs_diff_mean})"
+                    )
         return training_input
 
     def apply_reward_kl_penalty(

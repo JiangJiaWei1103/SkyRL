@@ -1174,6 +1174,10 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
+    rollout_train_logprobs_abs_diff_max: Optional[float] = None
+    """Refuse the training step when any loss-active token's ``|rollout logprob - trainer logprob|`` exceeds this
+    value or is not finite. ``None`` disables the check. Setting it keeps the policy forward pass that computes
+    the trainer logprobs, even for losses that could otherwise skip it."""
     enable_score_centering: Optional[bool] = None
     """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
     score under the sampler, cancelling the drift a training-inference mismatch adds to the policy

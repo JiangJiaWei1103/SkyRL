@@ -132,6 +132,50 @@ def test_fwd_logprobs_hands_full_rows_to_the_policy_forward_once_and_drops_them(
     assert batch["action_log_probs"].tolist() == [[-1.0, -2.0]]
 
 
+def _gate_trainer(bound):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.algorithm.rollout_train_logprobs_abs_diff_max = bound
+    trainer = _bare_trainer(cfg)
+    trainer.global_step = 3
+    trainer._execute_forward_pass = MagicMock(return_value=torch.tensor([[-1.0, -1.5]]))
+    return trainer
+
+
+def _gate_batch():
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[10, 11, 12]]),
+            "attention_mask": torch.ones((1, 3), dtype=torch.long),
+            "loss_mask": torch.ones((1, 2)),
+            "rollout_logprobs": torch.tensor([[-1.0, -2.0]]),
+        }
+    )
+    batch.metadata = {"response_length": 2}
+    return batch
+
+
+def test_logprob_mismatch_gate_refuses_above_the_bound():
+    with pytest.raises(RuntimeError, match="rollout_train_logprobs_abs_diff_max=0.25"):
+        _gate_trainer(0.25).fwd_logprobs_values_reward(_gate_batch())
+
+
+def test_logprob_mismatch_gate_accepts_a_difference_at_the_bound():
+    trainer = _gate_trainer(0.5)
+    out = trainer.fwd_logprobs_values_reward(_gate_batch())
+    assert out["action_log_probs"].tolist() == [[-1.0, -1.5]]
+    assert trainer.all_metrics["policy/rollout_train_logprobs_abs_diff_max"] == 0.5
+
+
+def test_logprob_mismatch_gate_keeps_the_policy_forward_for_rollout_anchored_losses():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.algorithm.policy_loss_type = "rollout_is"
+    trainer = _bare_trainer(cfg)
+    batch = _gate_batch()
+    assert trainer._skip_policy_forward(batch)
+    cfg.trainer.algorithm.rollout_train_logprobs_abs_diff_max = 0.0
+    assert not trainer._skip_policy_forward(batch)
+
+
 def _get_test_data(trainer: RayPPOTrainer):
     trainer.critic_model = MagicMock()  # pretend we're using a critic
 
