@@ -242,6 +242,8 @@ def default_cp_comm_type_for_sliding_window(config) -> None:
 
 
 class MegatronWorker:
+    # Strategy built in init_worker_process_group; can be overridden by subclasses. 
+    strategy_cls = MegatronStrategy
     _mfu_warned = False
 
     def _maybe_setup_fake_int4_qat(self):
@@ -1167,7 +1169,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.distributed.broadcast = _broadcast_no_grad
             torch.distributed._skyrl_broadcast_no_grad_patched = True
 
-        self.strategy = MegatronStrategy(
+        self.strategy = self.strategy_cls(
             megatron_config=self.cfg.policy.megatron_config,
             optimizer_config=self.cfg.policy.optimizer_config,
             seed=self.cfg.seed,
@@ -2368,7 +2370,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                 backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
-        self.strategy = MegatronStrategy(
+        self.strategy = self.strategy_cls(
             megatron_config=self.cfg.ref.megatron_config,
             optimizer_config=None,
             seed=self.cfg.seed,
