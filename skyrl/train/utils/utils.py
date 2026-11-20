@@ -563,6 +563,20 @@ def validate_optimizer_offload_to_disk_cfg(cfg: SkyRLTrainConfig):
         raise ValueError("optimizer_offload_to_disk requires a local trainer.ckpt_path.")
 
 
+def _validate_isoexec_cfg(cfg: SkyRLTrainConfig) -> None:
+    if cfg.isoexec is None:
+        return
+    try:
+        from isoexec.integrations.skyrl.bootstrap import validate_config
+    except ModuleNotFoundError as exc:
+        if exc.name == "isoexec":
+            raise RuntimeError(
+                "`isoexec` is set but the IsoExec package is not installed in this environment."
+            ) from exc
+        raise
+    validate_config(cfg)
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -796,6 +810,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 f"ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same "
                 f"when colocate policy and ref model."
             )
+
+    _validate_isoexec_cfg(cfg)
 
 
 def validate_generator_cfg(cfg: SkyRLTrainConfig):
@@ -1441,6 +1457,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
 
+    env_vars.update(cfg.trainer.extra_runtime_env_vars)
     return env_vars
 
 

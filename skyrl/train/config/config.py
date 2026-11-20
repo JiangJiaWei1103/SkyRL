@@ -1958,6 +1958,9 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    extra_runtime_env_vars: Dict[str, str] = field(default_factory=dict)
+    """Environment variables added, after the ones SkyRL derives from the config, to the Ray runtime env of every
+    actor SkyRL starts (trainer workers and inference engines)."""
     log_mfu: bool = True
     """Log model FLOPs utilization (MFU) metrics for policy training each step.
 
@@ -2286,6 +2289,14 @@ class SkyRLTrainConfig(BaseConfig):
     ``from_cli_overrides``): ``trainer.policy.model.path=...`` sets
     ``SkyRLTrainConfig.trainer.policy.model.path``.
     """
+
+    isoexec: Optional[Dict[str, Any]] = None
+    """Options for IsoExec, which makes the Megatron trainer and the vLLM inference engine compute
+    bit-identical logprobs. ``None`` disables it.
+
+    The keys are defined and validated by the IsoExec package, which must be installed in the driver,
+    trainer and inference engine environments. Parallelism is still set through the Megatron and
+    inference engine fields."""
 
     data: DataConfig = field(default_factory=DataConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)

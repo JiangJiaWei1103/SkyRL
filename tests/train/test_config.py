@@ -2,6 +2,7 @@
 uv run --isolated --extra dev pytest -s tests/train/test_config.py
 """
 
+import importlib.util
 import pathlib
 import typing
 from dataclasses import dataclass, field
@@ -1755,6 +1756,14 @@ def test_validate_cfg_rejects_invalid_step_timeouts(step_timeout_s, weight_sync_
     cfg.trainer.step_timeout_s = step_timeout_s
     cfg.trainer.weight_sync_timeout_s = weight_sync_timeout_s
     with pytest.raises(ValueError, match=match):
+        validate_cfg(cfg)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("isoexec") is not None, reason="needs an environment without IsoExec")
+def test_validate_cfg_requires_isoexec_package_when_isoexec_is_set():
+    cfg = _make_validated_test_config()
+    cfg.isoexec = {"model_package": "unused"}
+    with pytest.raises(RuntimeError, match="IsoExec package is not installed"):
         validate_cfg(cfg)
 
 
