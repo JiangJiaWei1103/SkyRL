@@ -1456,6 +1456,15 @@ class RayPPOTrainer:
         if training_input.get("image_grid_thw") is not None:
             fwd_keys.append("image_grid_thw")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
+        policy_data_fwd_pass = data_fwd_pass
+        if training_input.get("rollout_full_logprobs") is not None:
+            # Only the policy forward reads rollout_full_logprobs: keep it out of the ref and critic
+            # forwards, and out of training_input.
+            policy_data_fwd_pass = training_input.select(
+                keys=[*fwd_keys, "rollout_full_logprobs", "rollout_logprobs", "loss_mask"],
+                metadata_keys=["response_length"],
+            )
+            training_input.pop("rollout_full_logprobs")
 
         values = None
         base_log_probs = None
@@ -1485,7 +1494,7 @@ class RayPPOTrainer:
         else:
             action_log_probs = self._execute_forward_pass(
                 "policy",
-                data_fwd_pass,
+                policy_data_fwd_pass,
                 key="logprobs",
                 mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
             )

@@ -288,6 +288,13 @@ class MegatronModelWrapper:
         """
         return None
 
+    def _verify_full_logprobs(self, logits: torch.Tensor, data: Dict[str, Any]) -> None:
+        """Check the forward's logits against ``data["rollout_full_logprobs"]``.
+
+        Called for a micro-batch that carries those rows. Subclasses that support the check override this.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot verify rollout_full_logprobs")
+
     def _model_attention_mask(self, attention_mask):
         if self._implicit_causal_mask_only:
             return None
@@ -529,6 +536,8 @@ class MegatronModelWrapper:
                     cp_group=None,
                     chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
                 )
+            if data.get("rollout_full_logprobs") is not None:
+                self._verify_full_logprobs(logits, data)
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):

@@ -284,6 +284,50 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
     assert torch.allclose(data["returns"], expected_advantages)
 
 
+def test_rollout_full_logprobs_go_to_the_policy_forward_only(dummy_config, monkeypatch):
+    """Only the policy forward gets ``rollout_full_logprobs``, and it is gone from ``training_input`` afterwards."""
+    dummy_config.trainer.critic.model.path = "dummy"  # so that the critic forward runs
+    dummy_config.trainer.algorithm.policy_loss_type = "regular"  # reads old logprobs, so the policy forward runs
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=None,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.ref_model = MagicMock()  # so that the ref forward runs
+
+    batch_size, seq_len, response_len, vocab_size = 2, 5, 3, 7
+    training_input = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(batch_size, seq_len, dtype=torch.long),
+            "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+            "loss_mask": torch.ones(batch_size, response_len, dtype=torch.long),
+            "rollout_logprobs": torch.zeros(batch_size, response_len),
+            "rollout_full_logprobs": torch.zeros(batch_size, response_len, vocab_size),
+        }
+    )
+    training_input.metadata = {"response_length": response_len}
+
+    forward_keys = {}
+
+    def record_forward_keys(model, data_fwd_pass, key, mini_batch_boundaries):
+        forward_keys[model] = set(data_fwd_pass.keys())
+        return torch.zeros(batch_size, response_len)
+
+    monkeypatch.setattr(trainer, "_execute_forward_pass", record_forward_keys)
+
+    training_input = trainer.fwd_logprobs_values_reward(training_input)
+
+    assert "rollout_full_logprobs" not in forward_keys["critic"]
+    assert "rollout_full_logprobs" not in forward_keys["ref"]
+    assert {"rollout_full_logprobs", "rollout_logprobs", "loss_mask"} <= forward_keys["policy"]
+    assert "rollout_full_logprobs" not in training_input
+
+
 def test_flush_pending_metrics_logs_and_clears(dummy_config):
     """Metrics accumulated for an in-flight step are flushed to the tracker."""
     trainer = RayPPOTrainer(

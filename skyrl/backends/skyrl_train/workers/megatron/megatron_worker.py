@@ -242,7 +242,7 @@ def default_cp_comm_type_for_sliding_window(config) -> None:
 
 
 class MegatronWorker:
-    # Strategy built in init_worker_process_group; can be overridden by subclasses. 
+    # Strategy built in init_worker_process_group; can be overridden by subclasses.
     strategy_cls = MegatronStrategy
     _mfu_warned = False
 
@@ -943,6 +943,13 @@ class MegatronWorker:
                     **vlm_inputs,
                 }
             )
+            if micro.get("rollout_full_logprobs") is not None:
+                # The check of rollout_full_logprobs also reads the sampled logprobs and the loss mask.
+                micro_dicts[-1].update(
+                    rollout_full_logprobs=micro["rollout_full_logprobs"],
+                    rollout_logprobs=micro["rollout_logprobs"],
+                    loss_mask=micro["loss_mask"],
+                )
 
         if use_token_batching:
             # Pad microbatches to uniform batch size for Megatron compatibility
