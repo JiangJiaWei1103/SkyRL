@@ -271,6 +271,9 @@ class BasePPOExp:
                 PolicyWorker,
                 RefWorker,
             )
+
+            if self.cfg.isoexec is not None:
+                from isoexec.integrations.skyrl.workers import PolicyWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
