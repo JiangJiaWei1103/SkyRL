@@ -272,7 +272,8 @@ def build_new_inference_client(
     """Build the new HTTP-based inference client and supporting state for the policy.
 
     :func:`build_new_inference_client_impl` with the policy's engine block, model path and vLLM args,
-    plus the policy-only client fields (tokenizer, capture, score centering, LoRA sync).
+    plus the policy-only client fields (tokenizer, capture, score centering, LoRA sync). When
+    ``cfg.isoexec`` is set, IsoExec edits the vLLM args.
 
     Args:
         cfg: SkyRL train config.
@@ -283,11 +284,21 @@ def build_new_inference_client(
         Tuple of (client, server_setup); see :func:`build_new_inference_client_impl`.
     """
     ie_cfg = cfg.generator.inference_engine
+
+    def make_cli_args() -> Namespace:
+        cli_args = build_vllm_cli_args(cfg)
+        if cfg.isoexec is not None:
+            from isoexec.integrations.skyrl.config import configure_isoexec_vllm_engine
+
+            # IsoExec replaces engine args on ``cli_args``, including ``logprobs_mode`` (``"raw_logprobs"``).
+            configure_isoexec_vllm_engine(cfg, cli_args)
+        return cli_args
+
     return build_new_inference_client_impl(
         ie_cfg,
         model_path=cfg.trainer.policy.model.path,
         log_path=cfg.trainer.log_path,
-        make_cli_args=lambda: build_vllm_cli_args(cfg),
+        make_cli_args=make_cli_args,
         placement_group=placement_group,
         tokenizer=tokenizer,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,

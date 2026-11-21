@@ -1644,7 +1644,8 @@ class InferenceEngineConfig(BaseConfig):
     """Pass-through kwargs for the vLLM engine.
     Names must match the engine's args. Applied last, so they silently override config-derived
     engine args (e.g. ``tensor_parallel_size``). The exception is ``logprobs_mode``, which is
-    always ``"processed_logprobs"``; any other value is rejected.
+    always ``"processed_logprobs"``; any other value is rejected. When ``isoexec`` is set, the engine
+    runs with vLLM's default ``"raw_logprobs"`` instead; do not set ``logprobs_mode`` here.
 
     For HuggingFace config overrides such as RoPE scaling, use
     ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
