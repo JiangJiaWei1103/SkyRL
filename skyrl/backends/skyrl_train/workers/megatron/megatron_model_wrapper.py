@@ -275,6 +275,19 @@ class MegatronModelWrapper:
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
 
+    def _scale_logits(self, logits: torch.Tensor, temperature: float) -> torch.Tensor:
+        """Divide ``logits`` by the sampling temperature. Subclasses can override this."""
+        if temperature != 1.0:
+            logits.div_(temperature)
+        return logits
+
+    def _target_logprob_fn(self) -> Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]]:
+        """Function that computes each target token's logprob from its logits row.
+
+        ``None`` uses SkyRL's own. Subclasses can override this.
+        """
+        return None
+
     def _model_attention_mask(self, attention_mask):
         if self._implicit_causal_mask_only:
             return None
@@ -433,8 +446,8 @@ class MegatronModelWrapper:
                 fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
 
             # temperature normalization (the fused path applies it inside the op)
-            if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
+            if not fused_lm_head:
+                logits = self._scale_logits(logits, temperature)
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             if self.cfg.algorithm.enable_sample_support_replay:
@@ -503,6 +516,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     attention_mask=data["attention_mask"],
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                    logprob_fn=self._target_logprob_fn(),
                 )
             else:
                 token_logprobs = from_parallel_logits_to_logprobs(
@@ -837,8 +851,8 @@ class MegatronModelWrapper:
                 fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
 
             # temperature normalization (the fused path applies it inside the op)
-            if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
+            if not fused_lm_head:
+                logits = self._scale_logits(logits, temperature)
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             support_entropy = None
@@ -929,6 +943,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     attention_mask=data["attention_mask"],
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                    logprob_fn=self._target_logprob_fn(),
                 )
             else:
                 token_logprobs = from_parallel_logits_to_logprobs(

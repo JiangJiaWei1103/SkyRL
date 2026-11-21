@@ -18,7 +18,7 @@
 
 import warnings
 from math import prod
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import megatron.core.parallel_state as mpu
 import torch
@@ -689,6 +689,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     chunk_size: Optional[int] = None,
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    logprob_fn: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Get log probabilities from TP sharded vocab logits for packed sequences.
 
@@ -711,6 +712,9 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         sub_seq_lengths (list[list[int]], optional): Per-row sub-sequence lengths for controller-side sequence packing.
             When provided, ``cu_seqlens_padded`` is interpreted as one entry per sub-sequence, and output values are
             scattered back to the row offsets used by ``PackedDataCollator``.
+        logprob_fn (callable, optional): Computes the target logprobs in place of this function's distributed
+            log-softmax. Called with this rank's logits ``[1, T // CP, vocab_size // TP]`` and the shifted targets
+            ``[1, T // CP]``; returns ``[1, T // CP]``.
 
     Returns:
         torch.Tensor: Unpacked log probabilities tensor with shape [batch_size, unpacked_seqlen-1].
@@ -755,7 +759,9 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     # vocab_parallel_logits and recomputes softmax in backward (~3x peak memory
     # vs DistributedLogprob's ~2x), so chunking actively hurts in that regime.
     seq_len_local = vocab_parallel_logits.shape[1]
-    if chunk_size is not None and chunk_size < seq_len_local:
+    if logprob_fn is not None:
+        probs: torch.Tensor = logprob_fn(vocab_parallel_logits, rolled_targets).contiguous()
+    elif chunk_size is not None and chunk_size < seq_len_local:
         probs: torch.Tensor = ChunkedDistributedLogprob.apply(  # type: ignore
             vocab_parallel_logits,
             rolled_targets,
