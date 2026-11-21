@@ -20,6 +20,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 from skyrl.train.dataset.preprocess import (
     ROUTED_EXPERT_TORCH_DTYPES,
     build_sample_support,
+    collate_rollout_full_logprobs,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
@@ -490,6 +491,23 @@ def test_right_aligned_response_data(tokenizer):
     # Test does not mutate inputs
     assert prompts == prompts_copy
     assert responses == responses_copy
+
+
+def test_rollout_full_logprobs_are_right_aligned():
+    full_logprobs = [
+        np.array([[-0.1, -2.0]], dtype=np.float32),
+        np.array([[-0.2, -1.5], [-0.3, -1.0], [-0.4, -0.5]], dtype=np.float32),
+    ]
+
+    aligned = collate_rollout_full_logprobs(full_logprobs, max_response=3)
+
+    expected = torch.tensor(
+        [
+            [[0.0, 0.0], [0.0, 0.0], [-0.1, -2.0]],
+            [[-0.2, -1.5], [-0.3, -1.0], [-0.4, -0.5]],
+        ]
+    )
+    assert torch.equal(aligned, expected)
 
 
 def test_max_seq_len_warns_but_does_not_truncate(tokenizer):

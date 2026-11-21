@@ -382,6 +382,17 @@ def convert_prompts_responses_to_batch_tensors(
     )
 
 
+def collate_rollout_full_logprobs(
+    rollout_full_logprobs: List[np.ndarray], max_response: int
+) -> Float[torch.Tensor, "batch max_response vocab_size"]:
+    """Right-align each trajectory's ``[response_len, vocab_size]`` rows, like rollout logprobs."""
+    vocab_size = rollout_full_logprobs[0].shape[1]
+    aligned = np.zeros((len(rollout_full_logprobs), max_response, vocab_size), dtype=np.float32)
+    for i, sample_full_logprobs in enumerate(rollout_full_logprobs):
+        aligned[i, max_response - len(sample_full_logprobs) :] = sample_full_logprobs
+    return torch.from_numpy(aligned)
+
+
 def compute_prompt_boundaries(uids: List[str]) -> List[Tuple[int, int]]:
     """Compute per-prompt ``(start, end)`` slices from a flat ``uids`` list.
 
