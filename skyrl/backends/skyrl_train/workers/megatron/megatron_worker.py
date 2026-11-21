@@ -944,11 +944,11 @@ class MegatronWorker:
                 }
             )
             if micro.get("rollout_full_logprobs") is not None:
-                # The check of rollout_full_logprobs also reads the sampled logprobs and the loss mask.
                 micro_dicts[-1].update(
                     rollout_full_logprobs=micro["rollout_full_logprobs"],
                     rollout_logprobs=micro["rollout_logprobs"],
                     loss_mask=micro["loss_mask"],
+                    sample_indices=micro["sample_indices"],
                 )
 
         if use_token_batching:

@@ -1401,7 +1401,8 @@ class RayPPOTrainer:
 
         Safe only when the loss optimizes against rollout logprobs and nothing else reads the
         old logprobs: rollout logprobs are present (these losses fall back to old logprobs
-        without them), the KL reward penalty is off, and off-policy correction is disabled.
+        without them), the KL reward penalty is off, off-policy correction is disabled, and
+        IsoExec is off (it checks the old logprobs against the rollout logprobs).
 
         `cispo` is anchor-dependent: with `cispo.cispo_anchor="rollout"` it optimizes against the
         rollout logprobs (like `rollout_is`) and never reads the old logprobs, so the forward can
@@ -1421,7 +1422,38 @@ class RayPPOTrainer:
             and training_input.get("rollout_logprobs", None) is not None
             and not algorithm.use_kl_in_reward
             and not off_policy_correction_enabled(algorithm.off_policy_correction)
+            and self.cfg.isoexec is None
         )
+
+    def _isoexec_policy_forward(self, training_input: TrainingInputBatch, fwd_keys: List[str]) -> torch.Tensor:
+        """The policy forward, checked by IsoExec against the rollout.
+
+        IsoExec records the rows to be compared before the forward, and raises after the
+        forward unless everything is compared and equal.
+        """
+        from isoexec.integrations.skyrl.audit import (
+            after_policy_forward,
+            before_policy_forward,
+        )
+
+        data_fwd_pass = training_input.select(
+            keys=[*fwd_keys, "rollout_full_logprobs", "rollout_logprobs", "loss_mask"],
+            metadata_keys=["response_length"],
+        )
+        # A worker gets these rows split across DP ranks and regrouped into micro-batches,
+        # so each row carries its index in this batch.
+        data_fwd_pass["sample_indices"] = torch.arange(training_input.batch_size)
+        training_input.pop("rollout_full_logprobs")
+
+        before_policy_forward(self.cfg.isoexec, training_input, data_fwd_pass, global_step=self.global_step)
+        action_log_probs = self._execute_forward_pass(
+            "policy",
+            data_fwd_pass,
+            key="logprobs",
+            mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
+        )
+        self.all_metrics.update(after_policy_forward(training_input, data_fwd_pass, action_log_probs))
+        return action_log_probs
 
     @torch.no_grad()
     def fwd_logprobs_values_reward(
@@ -1456,15 +1488,6 @@ class RayPPOTrainer:
         if training_input.get("image_grid_thw") is not None:
             fwd_keys.append("image_grid_thw")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
-        policy_data_fwd_pass = data_fwd_pass
-        if training_input.get("rollout_full_logprobs") is not None:
-            # Only the policy forward reads rollout_full_logprobs: keep it out of the ref and critic
-            # forwards, and out of training_input.
-            policy_data_fwd_pass = training_input.select(
-                keys=[*fwd_keys, "rollout_full_logprobs", "rollout_logprobs", "loss_mask"],
-                metadata_keys=["response_length"],
-            )
-            training_input.pop("rollout_full_logprobs")
 
         values = None
         base_log_probs = None
@@ -1491,10 +1514,12 @@ class RayPPOTrainer:
         # `_skip_policy_forward`), where the resulting logprobs are never read.
         if self._skip_policy_forward(training_input):
             action_log_probs = None
+        elif self.cfg.isoexec is not None:
+            action_log_probs = self._isoexec_policy_forward(training_input, fwd_keys)
         else:
             action_log_probs = self._execute_forward_pass(
                 "policy",
-                policy_data_fwd_pass,
+                data_fwd_pass,
                 key="logprobs",
                 mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
             )
