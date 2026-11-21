@@ -67,6 +67,7 @@ from typing import (
 )
 
 import aiohttp
+import numpy as np
 import orjson
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
@@ -80,6 +81,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedField,
+    decode_packed_full_logprobs,
     decode_packed_routed_experts,
     decode_packed_sample_support,
     load_packed_body,
@@ -259,6 +261,7 @@ class RemoteGenerateResult:
     raw_response: Dict[str, Any]
     response_ids: List[int]
     response_logprobs: Optional[List[float]]
+    full_logprobs: Optional[np.ndarray]
     stop_reason: str
     routed_experts: Optional[RoutedExpertIndices]
     sample_support: Optional[CompactSampleSupport]
@@ -369,12 +372,15 @@ class RemoteGenerateClient:
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
         return_sample_support_logprobs: bool = False,
+        return_full_logprobs: bool = False,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
         """Generate one raw-token completion with optional per-token replay metadata.
 
         ``return_sample_support_logprobs`` also returns each support member's sampler logprob.
+        ``return_full_logprobs`` also returns each generated token's full-vocabulary logprob row; the
+        server needs the IsoExec package to produce it.
         """
         if return_sample_support_logprobs and not return_sample_support:
             raise ValueError("return_sample_support_logprobs requires return_sample_support=True")
@@ -388,7 +394,7 @@ class RemoteGenerateClient:
             ):
                 raise ValueError("routed_experts_prompt_start must be an integer within the prompt")
 
-        packed_side_channels = return_routed_experts or return_sample_support
+        packed_side_channels = return_routed_experts or return_sample_support or return_full_logprobs
         path = "/skyrl/v1/generate" if packed_side_channels else "/inference/v1/generate"
         request_sampling_params = dict(sampling_params)
         if routed_experts_prompt_start is not None:
@@ -402,6 +408,8 @@ class RemoteGenerateClient:
             payload["return_sample_support"] = True
         if return_sample_support_logprobs:
             payload["return_sample_support_logprobs"] = True
+        if return_full_logprobs:
+            payload["return_full_logprobs"] = True
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -447,10 +455,18 @@ class RemoteGenerateClient:
                     raise ValueError("/skyrl/v1/generate must return packed rollout_sample_support_logprobs")
             sample_support = decode_packed_sample_support(packed_sample_support, packed_logprobs)
 
+        full_logprobs = None
+        if return_full_logprobs:
+            packed_full_logprobs = choice.get(PackedField.FULL_LOGPROBS)
+            if not isinstance(packed_full_logprobs, dict):
+                raise ValueError("/skyrl/v1/generate must return packed full_logprobs")
+            full_logprobs = decode_packed_full_logprobs(packed_full_logprobs)
+
         return RemoteGenerateResult(
             raw_response=response,
             response_ids=token_ids,
             response_logprobs=response_logprobs,
+            full_logprobs=full_logprobs,
             stop_reason=choice["finish_reason"],
             routed_experts=routed_experts,
             sample_support=sample_support,
@@ -535,6 +551,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
     enable_return_sample_support_logprobs: bool = False
     """Whether captured support also carries each member's sampler logprob (score centering).
     Requires ``enable_return_sample_support_set``."""
+
+    enable_return_full_logprobs: bool = False
+    """Whether each generate request also returns the full-vocabulary logprob row of every generated token."""
 
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
@@ -688,6 +707,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         )
         return_sample_support_logprobs = return_sample_support and self.enable_return_sample_support_logprobs
         get_logprobs = sampling_params.get("logprobs") is not None
+        return_full_logprobs = self.enable_return_full_logprobs and get_logprobs
 
         # Two semaphores decouple the generate and detokenize stages:
         #   gen_sem:   limits concurrent in-flight generate requests so we don't
@@ -715,6 +735,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     ),
                     return_sample_support=return_sample_support,
                     return_sample_support_logprobs=return_sample_support_logprobs,
+                    return_full_logprobs=return_full_logprobs,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -729,6 +750,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     ),
                     return_sample_support=return_sample_support,
                     return_sample_support_logprobs=return_sample_support_logprobs,
+                    return_full_logprobs=return_full_logprobs,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -748,12 +770,16 @@ class RemoteInferenceClient(InferenceEngineInterface):
         rollout_sample_support = (
             [result[PackedField.ROLLOUT_SAMPLE_SUPPORT] for result in raw_results] if return_sample_support else None
         )
+        response_full_logprobs = (
+            [result[PackedField.FULL_LOGPROBS] for result in raw_results] if return_full_logprobs else None
+        )
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
+            response_full_logprobs=response_full_logprobs,
             rollout_expert_indices=rollout_expert_indices,
             rollout_sample_support=rollout_sample_support,
         )
@@ -769,6 +795,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
         return_sample_support_logprobs: bool = False,
+        return_full_logprobs: bool = False,
     ) -> Dict[str, Any]:
         result = await self._get_generate_client().generate(
             prompt_token_ids=prompt_token_ids,
@@ -779,6 +806,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             routed_experts_prompt_start=routed_experts_prompt_start,
             return_sample_support=return_sample_support,
             return_sample_support_logprobs=return_sample_support_logprobs,
+            return_full_logprobs=return_full_logprobs,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
@@ -786,6 +814,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "stop_reason": result.stop_reason,
             "response_ids": result.response_ids,
             "response_logprobs": result.response_logprobs,
+            PackedField.FULL_LOGPROBS.value: result.full_logprobs,
             "routed_experts": result.routed_experts,
             PackedField.ROLLOUT_SAMPLE_SUPPORT.value: result.sample_support,
         }

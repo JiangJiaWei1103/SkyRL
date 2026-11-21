@@ -47,6 +47,7 @@ class PackedArrayKey(StrEnum):
 class PackedField(StrEnum):
     """Response-body fields whose value is a packed-array envelope."""
 
+    FULL_LOGPROBS = "full_logprobs"
     ROUTED_EXPERTS = "routed_experts"
     ROLLOUT_SAMPLE_SUPPORT = "rollout_sample_support"
     # float32 sampler logprob of each support member, in the support's member order.
@@ -70,6 +71,8 @@ _ENVELOPE_KEYS = frozenset(PackedArrayKey)
 _ROUTED_EXPERTS_NDIM = 3
 _SAMPLE_SUPPORT_NDIM = 1
 _SAMPLE_SUPPORT_LOGPROBS_DTYPES = frozenset({SAMPLE_SUPPORT_LOGPROBS_DTYPE})
+_FULL_LOGPROBS_NDIM = 2
+_FULL_LOGPROBS_DTYPES = frozenset({np.dtype(np.float32)})
 
 _QUOTE = b'"'
 
@@ -249,6 +252,16 @@ def decode_packed_sample_support(
     return CompactSampleSupport.from_token_ids(
         decoded[num_rows:], decoded[:num_rows], top_k=top_k, logprobs=member_logprobs
     )
+
+
+def pack_full_logprobs(full_logprobs: np.ndarray) -> dict[str, Any]:
+    """Pack one response's float32 ``[num_tokens, vocab_size]`` logprob rows."""
+    return pack_ndarray(full_logprobs, allowed_dtypes=_FULL_LOGPROBS_DTYPES)
+
+
+def decode_packed_full_logprobs(payload: dict[str, Any]) -> np.ndarray:
+    full_logprobs, _ = unpack_ndarray(payload, allowed_dtypes=_FULL_LOGPROBS_DTYPES, ndim=_FULL_LOGPROBS_NDIM)
+    return full_logprobs
 
 
 def _data_prefix(field: str) -> bytes:

@@ -286,13 +286,20 @@ def build_new_inference_client(
     ie_cfg = cfg.generator.inference_engine
 
     def make_cli_args() -> Namespace:
-        cli_args = build_vllm_cli_args(cfg)
-        if cfg.isoexec is not None:
-            from isoexec.integrations.skyrl.config import configure_isoexec_vllm_engine
+        return build_vllm_cli_args(cfg)
 
+    enable_return_full_logprobs = False
+    if cfg.isoexec is not None:
+        from isoexec.integrations.skyrl.config import configure_isoexec_vllm_engine
+        from isoexec.integrations.skyrl.inference import full_comparison_enabled
+
+        def make_cli_args() -> Namespace:
+            cli_args = build_vllm_cli_args(cfg)
             # IsoExec replaces engine args on ``cli_args``, including ``logprobs_mode`` (``"raw_logprobs"``).
             configure_isoexec_vllm_engine(cfg, cli_args)
-        return cli_args
+            return cli_args
+
+        enable_return_full_logprobs = full_comparison_enabled(cfg.isoexec)
 
     return build_new_inference_client_impl(
         ie_cfg,
@@ -304,6 +311,7 @@ def build_new_inference_client(
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
         enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
+        enable_return_full_logprobs=enable_return_full_logprobs,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
     )
 

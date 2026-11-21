@@ -15,9 +15,11 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedArrayKey,
     PackedField,
     build_logprobs_content,
+    decode_packed_full_logprobs,
     decode_packed_routed_experts,
     decode_packed_sample_support,
     load_packed_body,
+    pack_full_logprobs,
     pack_ndarray,
     pack_routed_experts,
     pack_sample_support,
@@ -235,6 +237,21 @@ def test_packed_sample_support_decodes_from_a_spliced_body():
 
     assert isinstance(envelope[PackedArrayKey.DATA], memoryview)
     assert np.array_equal(dense(decoded), dense(support))
+
+
+def test_packed_full_logprobs_round_trip_from_a_spliced_body():
+    # Signed zero, a denormal and the float32 extremes must come back bit for bit.
+    extremes = np.finfo(np.float32)
+    full_logprobs = np.array([[-0.0, 1e-45, extremes.tiny], [-extremes.max, -0.25, -1.5]], dtype=np.float32)
+    raw = orjson.dumps(_body(full_logprobs=pack_full_logprobs(full_logprobs)))
+
+    envelope = load_packed_body(raw)["choices"][0][PackedField.FULL_LOGPROBS]
+    decoded = decode_packed_full_logprobs(envelope)
+
+    assert isinstance(envelope[PackedArrayKey.DATA], memoryview)
+    assert decoded.dtype == np.float32
+    assert decoded.shape == full_logprobs.shape
+    assert decoded.tobytes() == full_logprobs.tobytes()
 
 
 def _raw_support_envelope(data, **sidecar) -> dict:

@@ -43,6 +43,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     PackedField,
     build_logprobs_content,
+    pack_full_logprobs,
     pack_routed_experts,
     pack_sample_support,
     pack_sample_support_logprobs,
@@ -589,11 +590,24 @@ class VLLMServerActor(ServerActorProtocol):
 
             capture_sample_support = body.get("return_sample_support", False)
             capture_sample_support_logprobs = body.get("return_sample_support_logprobs", False)
+            capture_full_logprobs = body.get("return_full_logprobs", False)
             if capture_sample_support_logprobs and not capture_sample_support:
                 raise HTTPException(
                     status_code=400,
                     detail="return_sample_support_logprobs requires return_sample_support",
                 )
+            if capture_full_logprobs:
+                from isoexec.integrations.skyrl.inference import (
+                    prepare_full_logprobs_capture,
+                )
+
+                # IsoExec checks that this request and engine can return full-vocabulary rows, and sets
+                # the sampling params that make the engine produce them.
+                try:
+                    prepare_full_logprobs_capture(body, sampling_params_dict, engine.model_config, lora_request)
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+
             if capture_sample_support:
                 # Sample support requires a bounded, non-degenerate top-k set.
                 top_k = sampling_params_dict.get("top_k")
@@ -665,6 +679,15 @@ class VLLMServerActor(ServerActorProtocol):
             if resp.routed_experts is not None:
                 routed_experts = pack_routed_experts(resp.routed_experts)
 
+            packed_full_logprobs = None
+            if capture_full_logprobs:
+                from isoexec.integrations.skyrl.inference import (
+                    full_logprobs_from_output,
+                )
+
+                full_logprobs = full_logprobs_from_output(resp, engine.model_config.get_vocab_size())
+                packed_full_logprobs = pack_full_logprobs(full_logprobs)
+
             payload = {
                 "choices": [
                     {
@@ -674,6 +697,7 @@ class VLLMServerActor(ServerActorProtocol):
                         PackedField.ROUTED_EXPERTS.value: routed_experts,
                         PackedField.ROLLOUT_SAMPLE_SUPPORT.value: packed_sample_support,
                         PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS.value: packed_sample_support_logprobs,
+                        PackedField.FULL_LOGPROBS.value: packed_full_logprobs,
                     }
                 ]
             }
