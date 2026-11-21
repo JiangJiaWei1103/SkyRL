@@ -41,7 +41,7 @@ def test_inference_runtime_starts_without_trainer_dispatch():
     backend._renderer = None
     backend._render_server = None
 
-    cfg = Mock()
+    cfg = Mock(isoexec=None)
     with (
         patch("skyrl.backends.skyrl_train_backend._build_skyrl_train_config", return_value=cfg),
         patch("skyrl.backends.skyrl_train_backend.ray.is_initialized", return_value=True),

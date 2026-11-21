@@ -230,8 +230,14 @@ async def _close_external_inference(app: FastAPI) -> None:
 
 
 def _should_forward_sample_requests(config: EngineConfig) -> bool:
-    """Return whether samples can bypass the engine for managed inference."""
+    """Return whether samples can bypass the engine for managed inference.
+
+    IsoExec's backend records each sample's logprobs to compare them in the
+    later forward_backward, so every sample has to go through it.
+    """
     if config.backend not in ("megatron", "fsdp") or config.runtime_role != "combined":
+        return False
+    if (config.backend_config or {}).get("isoexec") is not None:
         return False
     backend_config = flatten_backend_config(config.backend_config or {})
     return not bool(backend_config.get("trainer.placement.colocate_all", True))

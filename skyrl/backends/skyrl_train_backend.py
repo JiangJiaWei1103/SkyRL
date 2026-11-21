@@ -230,7 +230,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # True while a Tinker profiling session is live on the policy workers.
         self._profiling = False
         self._colocate_pg: ResolvedPlacementGroup | None = None
-        self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
+        self._tokenizer: AutoTokenizer = self._load_tokenizer()
         self._inference_engine_client = None
         self._inference_engines_initialized = False
         # Tenants whose LoRA adapters are currently registered on the
@@ -261,6 +261,20 @@ class SkyRLTrainBackend(AbstractBackend):
         # set_inference_state_publisher. None when running outside a host
         # that needs to be notified (unit tests, non-Tinker uses).
         self._inference_state_publisher: Callable[[str | None], None] | None = None
+
+    def _load_tokenizer(self) -> AutoTokenizer:
+        """Load the tokenizer associated with this backend's base model."""
+        return get_tokenizer(self.base_model)
+
+    def _build_config(self, lora_config: types.LoraConfig | None = None) -> SkyRLTrainConfig:
+        """Build the worker config from ``backend_config`` before Ray and the workers start."""
+        cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+        if cfg.isoexec is not None:
+            raise ValueError(
+                "isoexec is set, but the Tinker engine built SkyRL's own backend, whose workers cannot run it. "
+                'Give isoexec as one mapping in backend_config, {"isoexec": {...}}, so the engine builds IsoExec\'s backend.'
+            )
+        return cfg
 
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
@@ -582,7 +596,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_engines_initialized:
             return
         if self.config.runtime_role == "inference" and getattr(self, "_cfg", None) is None:
-            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config=None)
+            self._cfg = self._build_config()
             if not ray.is_initialized():
                 initialize_ray(self._cfg)
         elif hasattr(self, "_cfg") and self._cfg is None:
@@ -685,7 +699,7 @@ class SkyRLTrainBackend(AbstractBackend):
             with cleanup_on_error(
                 lambda: self._discard_partial_runtime(cfg_before), "Discarding the partially built runtime"
             ):
-                self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+                self._cfg = self._build_config(lora_config)
 
                 if not ray.is_initialized():
                     logger.info("Initializing Ray with runtime environment")
@@ -1224,11 +1238,12 @@ class SkyRLTrainBackend(AbstractBackend):
                 "critic",
                 value_clip=(loss_fn_config or {}).get("value_clip", self._cfg.trainer.algorithm.value_clip),
             )
-            data = self._dispatch.forward_backward("critic", batch, model_id=model_id)
+            data = self._execute_model_pass("critic", batch, backward=True, model_id=model_id)
         else:
-            data = self._dispatch.forward_backward(
+            data = self._execute_model_pass(
                 role,
                 batch,
+                backward=True,
                 loss_fn=loss_fn,
                 loss_fn_config=loss_fn_config,
                 model_id=model_id,
@@ -1292,7 +1307,7 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
         model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
-        data = self._dispatch.forward(role, batch, model_id=model_id)
+        data = self._execute_model_pass(role, batch, model_id=model_id)
 
         # Workers emit per-sample loss_fn_outputs directly. Trim padding entries.
         per_sample_outputs = data.loss_fn_outputs
@@ -1328,6 +1343,11 @@ class SkyRLTrainBackend(AbstractBackend):
                 metrics={},
             )
         return results
+
+    def _execute_model_pass(self, role: str, batch: TrainingInputBatch, *, backward: bool = False, **kwargs):
+        """Dispatch a fully prepared batch to the native actor pass method."""
+        actor_pass = self._dispatch.forward_backward if backward else self._dispatch.forward
+        return actor_pass(role, batch, **kwargs)
 
     # ------------------------------------------------------------------
     # torch.profiler control for the Tinker /start_profiling endpoints.

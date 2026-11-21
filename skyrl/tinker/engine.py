@@ -393,6 +393,10 @@ class TinkerEngine:
             if config.base_model_checkpoint_path is not None:
                 backend_overrides["generator.inference_engine.served_model_name"] = config.base_model
         backend_config = backend_config_class(**backend_overrides)
+        if backend_overrides.get("isoexec") is not None:
+            from isoexec.integrations.skyrl.tinker import backend_class_for
+
+            backend_class = backend_class_for(config)
         self.backend = backend_class(config.base_model_checkpoint_path or config.base_model, backend_config)
 
         # Backends that support async sample routing notify us when their
