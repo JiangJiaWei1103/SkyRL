@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import os
+import sys
 import tempfile
 import urllib.request
 from urllib.parse import urlparse
@@ -710,6 +711,12 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
                 "-m",
                 "skyrl.tinker.engine",
             ],
+        ),
+        (
+            # jax backend with --no-project in the api server startup command
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            ["uv", "run", "--isolated", "--no-project", "--", "/path/to/venv/bin/python", "-m", "skyrl.tinker.api"],
+            ["uv", "run", "--isolated", "--no-project", sys.executable, "-m", "skyrl.tinker.engine"],
         ),
     ],
 )

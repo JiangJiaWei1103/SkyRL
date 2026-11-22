@@ -5,6 +5,7 @@ import random
 import re
 import shutil
 import signal
+import sys
 import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
@@ -304,8 +305,12 @@ def _build_uv_run_cmd_engine(parent_cmd: list[str], engine_config: BaseModel) ->
     parent_flags = _get_parent_uv_run_args(parent_cmd)
     logger.debug(f"Detected API server uv run flags: {parent_flags}")
     cmd.extend(parent_flags)
-    # NOTE: uv deduplicates extras so we can unconditionally add the tinker extra
-    cmd.extend(["--extra", "tinker", "--extra", engine_config.backend])
+    if "--no-project" in parent_flags:
+        # uv ignores --extra without a project, so the engine runs on the API's own interpreter.
+        cmd.append(sys.executable)
+    else:
+        # NOTE: uv deduplicates extras so we can unconditionally add the tinker extra
+        cmd.extend(["--extra", "tinker", "--extra", engine_config.backend])
     cmd.extend(["-m", "skyrl.tinker.engine"])
     cmd.extend(config_to_argv(engine_config))
     return cmd
